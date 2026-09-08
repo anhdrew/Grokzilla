@@ -4,6 +4,21 @@ Desktop GUI for [Grok Build CLI](https://docs.x.ai/build/overview). Same agent, 
 
 macOS only. Grokzilla does **not** reimplement the model or tool loop. It spawns `grok agent stdio` and speaks [ACP](https://agentclientprotocol.com).
 
+## Install
+
+Download the macOS `.dmg` from [Releases](https://github.com/anhdrew/Grokzilla/releases). Pick `aarch64` for Apple Silicon or `x86_64` for Intel.
+
+The build is ad-hoc signed (no Apple Developer ID). First launch: right-click **Grokzilla.app** → **Open**, or allow it in **System Settings → Privacy & Security**.
+
+To cut a new GitHub Release, bump `version` in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, then:
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+GitHub Actions builds both Mac chips and uploads the `.dmg` files to the release.
+
 ## Requirements
 
 - macOS 13+

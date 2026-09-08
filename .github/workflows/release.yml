@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - args: "--target aarch64-apple-darwin"
+          - args: "--target x86_64-apple-darwin"
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: "-"
+        with:
+          tagName: v__VERSION__
+          releaseName: Grokzilla v__VERSION__
+          releaseBody: |
+            macOS 13+. Download the `.dmg` for your chip:
+            - `aarch64` — Apple Silicon (M1 and later)
+            - `x86_64` — Intel
+
+            This build is ad-hoc signed (no Apple Developer ID). First launch: right-click the app → Open, or allow it in System Settings → Privacy & Security.
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
