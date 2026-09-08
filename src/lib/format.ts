@@ -151,48 +151,99 @@ export function extractText(value: unknown): string {
   return "";
 }
 
-export type PlanEntry = { content: string; status?: string };
+export type { PlanEntry } from "./plan";
+export { planEntries } from "./plan";
 
-export function planEntries(raw: unknown): PlanEntry[] {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map((item) => {
-      if (typeof item === "string") return { content: item };
-      const rec = asRecord(item);
-      if (!rec) return null;
-      const content =
-        (typeof rec.content === "string" && rec.content) ||
-        (typeof rec.text === "string" && rec.text) ||
-        (typeof rec.title === "string" && rec.title) ||
-        "";
-      if (!content) return null;
-      return {
-        content,
-        status: typeof rec.status === "string" ? rec.status : undefined,
-      };
-    })
-    .filter((entry): entry is PlanEntry => Boolean(entry));
+export function normalizeModeId(raw?: string | null): string | undefined {
+  if (!raw) return undefined;
+  const id = raw.trim().toLowerCase();
+  if (!id) return undefined;
+  if (id === "default" || id === "normal" || id === "code") return "ask";
+  if (id === "always-approve" || id === "always") return "yolo";
+  if (id === "architect") return "plan";
+  if (id === "agent") return "auto";
+  return id;
 }
 
 export function modeLabel(modeId: string): string {
-  if (modeId === "yolo") return "Always";
-  if (!modeId) return "Mode";
-  return modeId.charAt(0).toUpperCase() + modeId.slice(1);
+  const id = normalizeModeId(modeId) ?? modeId;
+  if (id === "yolo") return "Always";
+  if (!id) return "Mode";
+  return id.charAt(0).toUpperCase() + id.slice(1);
 }
 
 export type WorkStatus = "running" | "needs-input";
 
+export function toolIsLive(status?: string) {
+  return /^(in_progress|in-progress|running)$/i.test((status ?? "").trim());
+}
+
+export function hasInProgressTools(blocks: Array<{ type: string; status?: string }> = []) {
+  return blocks.some((block) => block.type === "tool" && toolIsLive(block.status));
+}
+
+export function isWorkUpdate(kind?: string) {
+  return (
+    kind === "agent_message_chunk" ||
+    kind === "agent_thought_chunk" ||
+    kind === "tool_call" ||
+    kind === "tool_call_update" ||
+    kind === "plan"
+  );
+}
+
+export function isTurnEndUpdate(kind?: string) {
+  return kind === "turn_completed" || kind === "task_completed";
+}
+
+export function isTranscriptLive(
+  transcript: { status?: string; blocks?: Array<{ type: string; status?: string }> } | undefined,
+  sending = false,
+  selected = false,
+): boolean {
+  if (sending && selected) return true;
+  if (!transcript) return false;
+  if (transcript.status === "running") return true;
+  return hasInProgressTools(transcript.blocks);
+}
+
+const SESSION_UUID =
+  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+export function parseSessionId(raw: string): string {
+  const trimmed = raw.trim().replace(/^['"]+|['"]+$/g, "");
+  if (!trimmed) return "";
+  const uuid = trimmed.match(SESSION_UUID);
+  if (uuid) return uuid[0].toLowerCase();
+  const last = trimmed.split(/[\\/\s]/).filter(Boolean).pop() ?? trimmed;
+  return last.trim();
+}
+
+export function isSafeSessionId(id: string): boolean {
+  return id.length > 0 && id.length < 128 && /^[A-Za-z0-9_-]+$/.test(id);
+}
+
+export function isReadOnlySession(
+  sessionId: string | null | undefined,
+  threads: Array<{ sessionId: string; headless?: boolean }>,
+  readOnlyIds: string[] = [],
+): boolean {
+  if (!sessionId) return false;
+  if (readOnlyIds.includes(sessionId)) return true;
+  return Boolean(threads.find((item) => item.sessionId === sessionId)?.headless);
+}
+
 export function workStatus(
   sessionIds: string[],
-  transcripts: Record<string, { status?: string } | undefined>,
+  transcripts: Record<string, { status?: string; blocks?: Array<{ type: string; status?: string }> } | undefined>,
   sending = false,
   selectedSession: string | null = null,
 ): WorkStatus | null {
   let waiting = false;
   for (const id of sessionIds) {
-    const live = sending && selectedSession === id ? "running" : transcripts[id]?.status;
-    if (live === "running") return "running";
-    if (live === "needs-input") waiting = true;
+    const transcript = transcripts[id];
+    if (isTranscriptLive(transcript, sending, selectedSession === id)) return "running";
+    if (transcript?.status === "needs-input") waiting = true;
   }
   return waiting ? "needs-input" : null;
 }

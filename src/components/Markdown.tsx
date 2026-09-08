@@ -1,6 +1,8 @@
+import { memo, useMemo } from "react";
 import type { Components } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { splitMarkdownBlocks } from "../lib/markdown";
 
 function CodeBlock({ className, children }: { className?: string; children?: React.ReactNode }) {
   const lang = /language-([\w+-]+)/.exec(className ?? "")?.[1];
@@ -29,12 +31,21 @@ const components: Components = {
   },
 };
 
-export function Markdown({ text }: { text: string }) {
+const MarkdownBlock = memo(function MarkdownBlock({ text }: { text: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      {text}
+    </ReactMarkdown>
+  );
+});
+
+export const Markdown = memo(function Markdown({ text }: { text: string }) {
+  const blocks = useMemo(() => splitMarkdownBlocks(text || ""), [text]);
   return (
     <div className="markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-        {text || ""}
-      </ReactMarkdown>
+      {blocks.map((block, index) => (
+        <MarkdownBlock key={index} text={block} />
+      ))}
     </div>
   );
-}
+});

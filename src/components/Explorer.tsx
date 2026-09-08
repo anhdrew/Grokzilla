@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { setExplorerDrag } from "../lib/explorer-drag";
 import { projectName } from "../lib/format";
@@ -6,7 +6,7 @@ import { useApp } from "../lib/store";
 import type { PathHit } from "../lib/types";
 import { IconFile, IconFolder, IconSearch } from "./icons";
 
-export function Explorer() {
+export const Explorer = memo(function Explorer() {
   const cwd = useApp((s) => s.selectedCwd);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<PathHit[]>([]);
@@ -72,7 +72,7 @@ export function Explorer() {
       </div>
     </aside>
   );
-}
+});
 
 function ExplorerDir({ cwd, rel, depth }: { cwd: string; rel: string; depth: number }) {
   const [rows, setRows] = useState<PathHit[] | null>(null);

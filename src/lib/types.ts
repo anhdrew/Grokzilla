@@ -15,6 +15,12 @@ export type PermissionRequest = {
   raw: Record<string, unknown>;
 };
 
+export type PlanDoc = {
+  path: string;
+  markdown: string;
+  exists: boolean;
+};
+
 export type ToolLocation = { path: string; line?: number };
 
 export type ToolBlock = {
@@ -29,6 +35,7 @@ export type ToolBlock = {
   content?: unknown;
   locations?: ToolLocation[];
   collapsed: boolean;
+  truncated?: boolean;
 };
 
 export type TranscriptBlock =
@@ -102,6 +109,8 @@ export type ThreadInfo = {
   updatedAt?: string | null;
   createdAt?: string | null;
   messageCount?: number | null;
+  headless?: boolean;
+  watchStatus?: "running" | "done" | "error" | string;
 };
 
 export type ProjectInfo = {
@@ -147,5 +156,7 @@ export type SessionUpdate = {
   locations?: ToolLocation[];
   entries?: unknown[];
   currentModeId?: string;
+  modeId?: string;
   availableCommands?: Array<SlashCommand & { input?: { hint?: string } }>;
+  truncated?: boolean;
 };

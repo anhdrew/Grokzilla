@@ -49,7 +49,10 @@ export function replaceToken(text: string, token: ActiveToken, insert: string): 
 export const APP_COMMANDS = [
   { name: "new", description: "Start a new thread", source: "app" },
   { name: "clear", description: "Start a new thread", source: "app" },
-  { name: "plan", description: "Switch to plan mode", source: "app" },
+  { name: "resume", description: "Open a session by id", source: "app", hint: "session id" },
+  { name: "view", description: "Open a session read-only", source: "app", hint: "session id" },
+  { name: "plan", description: "Switch to plan mode", source: "app", hint: "what to plan" },
+  { name: "view-plan", description: "Open the saved plan", source: "app" },
   { name: "always-approve", description: "Skip permission prompts", source: "app" },
   { name: "effort", description: "Set thinking level", source: "app", hint: "low | medium | high | xhigh" },
   { name: "compact", description: "Compress conversation history", source: "app", hint: "what to keep" },

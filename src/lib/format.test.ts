@@ -3,11 +3,17 @@ import {
   compactNumber,
   extractText,
   formatReset,
+  isReadOnlySession,
+  isSafeSessionId,
   modeLabel,
+  normalizeModeId,
+  parseSessionId,
   planEntries,
   shortPath,
   toolDetail,
   toolVerb,
+  hasInProgressTools,
+  isTranscriptLive,
   workStatus,
 } from "./format";
 
@@ -65,6 +71,10 @@ describe("planEntries / modeLabel", () => {
     ]);
     expect(modeLabel("yolo")).toBe("Always");
     expect(modeLabel("ask")).toBe("Ask");
+    expect(modeLabel("default")).toBe("Ask");
+    expect(modeLabel("always-approve")).toBe("Always");
+    expect(normalizeModeId("default")).toBe("ask");
+    expect(normalizeModeId("yolo")).toBe("yolo");
   });
 });
 
@@ -83,9 +93,63 @@ describe("workStatus", () => {
     expect(workStatus(["a"], { a: { status: "idle" } }, true, "other")).toBeNull();
   });
 
+  it("treats in-progress tools as running even after send() settles", () => {
+    expect(
+      workStatus(["a"], {
+        a: { status: "idle", blocks: [{ type: "tool", status: "in_progress" }] },
+      }),
+    ).toBe("running");
+    expect(hasInProgressTools([{ type: "tool", status: "pending" }])).toBe(false);
+    expect(hasInProgressTools([{ type: "assistant" }])).toBe(false);
+    expect(isTranscriptLive({ status: "running" })).toBe(true);
+  });
+
   it("ignores idle and error", () => {
     expect(workStatus(["a"], { a: { status: "idle" } })).toBeNull();
     expect(workStatus(["a"], { a: { status: "error" } })).toBeNull();
     expect(workStatus(["a"], { a: { status: "needs-input" } })).toBe("needs-input");
+  });
+});
+
+describe("parseSessionId", () => {
+  it("extracts a UUID from pasted text or a path", () => {
+    expect(parseSessionId("  01a07ece-f6f9-7d61-930f-cc789f20cae6  ")).toBe(
+      "01a07ece-f6f9-7d61-930f-cc789f20cae6",
+    );
+    expect(parseSessionId("01A07ECE-F6F9-7D61-930F-CC789F20CAE6")).toBe(
+      "01a07ece-f6f9-7d61-930f-cc789f20cae6",
+    );
+    expect(
+      parseSessionId("resume 01a07ece-f6f9-7d61-930f-cc789f20cae6 now"),
+    ).toBe("01a07ece-f6f9-7d61-930f-cc789f20cae6");
+    expect(
+      parseSessionId("/Users/anh/.grok/sessions/proj/01a07ece-f6f9-7d61-930f-cc789f20cae6"),
+    ).toBe("01a07ece-f6f9-7d61-930f-cc789f20cae6");
+  });
+
+  it("keeps custom ids from a path", () => {
+    expect(parseSessionId("sess-custom_1")).toBe("sess-custom_1");
+    expect(parseSessionId("~/.grok/sessions/proj/sess-custom_1")).toBe("sess-custom_1");
+    expect(parseSessionId("")).toBe("");
+  });
+});
+
+describe("isSafeSessionId / isReadOnlySession", () => {
+  it("rejects path-like ids", () => {
+    expect(isSafeSessionId("01a07ece-f6f9-7d61-930f-cc789f20cae6")).toBe(true);
+    expect(isSafeSessionId("../etc")).toBe(false);
+    expect(isSafeSessionId("a/b")).toBe(false);
+    expect(isSafeSessionId("")).toBe(false);
+  });
+
+  it("treats headless and explicit ids as read-only", () => {
+    const threads = [
+      { sessionId: "live" },
+      { sessionId: "head", headless: true },
+    ];
+    expect(isReadOnlySession("live", threads)).toBe(false);
+    expect(isReadOnlySession("head", threads)).toBe(true);
+    expect(isReadOnlySession("live", threads, ["live"])).toBe(true);
+    expect(isReadOnlySession(null, threads, ["live"])).toBe(false);
   });
 });

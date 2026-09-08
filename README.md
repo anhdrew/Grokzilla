@@ -30,7 +30,11 @@ pnpm tauri dev
 2. Start a thread or resume one from `~/.grok/sessions` (shared with the TUI).
 3. Ask Grok to work. In **Ask** mode, tool calls wait for a click.
 
-Shortcuts: `Cmd+N` new thread, `Cmd+J` review pane, `Enter` send, `Esc` stop.
+Shortcuts: `Cmd+N` new thread, `Cmd+J` review pane, `Enter` send, `Esc` stop. Hover a thread and click the terminal icon to resume it in Terminal (`grok --resume`). Plan mode (`/plan`) opens a review sheet for `plan.md` — approve, request changes, or quit. `/view-plan` reopens it.
+
+Paste a session id in the sidebar to open it. **Read-only** hydrates the transcript from disk and never attaches (safe while the TUI or `grok -p` is using that session). **Open** resumes and attaches. `/view <id>` and `/resume <id>` do the same from the composer.
+
+Headless `grok -p` sessions show in the sidebar with a `-p` badge. Grokzilla watches status and results from disk (read-only) and never attaches, so it cannot interrupt a running one-shot prompt.
 
 ## Architecture
 

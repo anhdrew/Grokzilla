@@ -1,8 +1,13 @@
 use crate::grok::grok_home;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+const TOOL_PREVIEW_LIMIT: usize = 4096;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,6 +20,8 @@ pub struct ThreadInfo {
     pub updated_at: Option<String>,
     pub created_at: Option<String>,
     pub message_count: Option<u64>,
+    pub headless: bool,
+    pub watch_status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -30,13 +37,16 @@ pub fn sessions_root() -> PathBuf {
 }
 
 pub fn list_threads() -> Result<Vec<ThreadInfo>, String> {
-    let root = sessions_root();
+    list_threads_in(&sessions_root())
+}
+
+fn list_threads_in(root: &Path) -> Result<Vec<ThreadInfo>, String> {
     if !root.is_dir() {
         return Ok(Vec::new());
     }
 
     let mut threads = Vec::new();
-    let groups = fs::read_dir(&root).map_err(|e| e.to_string())?;
+    let groups = fs::read_dir(root).map_err(|e| e.to_string())?;
     for group in groups.flatten() {
         let group_path = group.path();
         if !group_path.is_dir() {
@@ -56,14 +66,148 @@ pub fn list_threads() -> Result<Vec<ThreadInfo>, String> {
             if !summary_path.is_file() {
                 continue;
             }
-            if let Some(thread) = parse_summary(&summary_path, group_cwd.as_deref()) {
-                threads.push(thread);
-            }
+            let Some(mut thread) = parse_summary(&summary_path, group_cwd.as_deref()) else {
+                continue;
+            };
+            thread.headless = is_non_interactive_session(&session_path);
+            thread.watch_status = watch_status(&session_path);
+            threads.push(thread);
         }
     }
 
     threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok(threads)
+}
+
+pub fn find_thread(session_id: &str) -> Result<ThreadInfo, String> {
+    find_thread_in(&sessions_root(), session_id)
+}
+
+fn find_thread_in(root: &Path, session_id: &str) -> Result<ThreadInfo, String> {
+    let id = session_id.trim();
+    if !is_safe_session_id(id) {
+        return Err("invalid session id".into());
+    }
+    let dir = find_session_dir_in(root, "", id);
+    let summary = dir.join("summary.json");
+    if !summary.is_file() {
+        return Err(format!("session {id} was not found"));
+    }
+    let group_cwd = dir.parent().and_then(cwd_for_group);
+    let Some(mut thread) = parse_summary(&summary, group_cwd.as_deref()) else {
+        return Err(format!("session {id} was not found"));
+    };
+    thread.headless = is_non_interactive_session(&dir);
+    thread.watch_status = watch_status(&dir);
+    Ok(thread)
+}
+
+pub fn reject_non_interactive(session_id: &str, cwd: &str) -> Result<(), String> {
+    if is_non_interactive_session(&find_session_dir(cwd, session_id)) {
+        return Err(
+            "This is a grok -p (headless) session. Grokzilla watches it read-only and will not attach."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+pub fn reject_live_headless(session_id: &str, cwd: &str) -> Result<(), String> {
+    let dir = find_session_dir(cwd, session_id);
+    if is_non_interactive_session(&dir) && watch_status(&dir) == "running" {
+        return Err(
+            "This grok -p session is still running. Grokzilla will not attach or delete it."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn watch_status(session_dir: &Path) -> String {
+    let updates = session_dir.join("updates.jsonl");
+    let kind = last_update_kind(&updates);
+    if matches!(kind.as_deref(), Some("turn_completed") | Some("task_completed")) {
+        return "done".into();
+    }
+    if file_is_fresh(&updates, Duration::from_secs(20))
+        || file_is_fresh(&session_dir.join("summary.json"), Duration::from_secs(20))
+    {
+        return "running".into();
+    }
+    if kind.as_deref() == Some("error") {
+        return "error".into();
+    }
+    "done".into()
+}
+
+fn file_is_fresh(path: &Path, max_age: Duration) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    SystemTime::now()
+        .duration_since(modified)
+        .map(|age| age <= max_age)
+        .unwrap_or(false)
+}
+
+fn last_update_kind(path: &Path) -> Option<String> {
+    let line = last_nonempty_line(path)?;
+    let value: Value = serde_json::from_str(&line).ok()?;
+    let update = value
+        .get("params")
+        .and_then(|params| params.get("update"))
+        .cloned()
+        .or_else(|| value.get("update").cloned())?;
+    update
+        .get("sessionUpdate")
+        .and_then(Value::as_str)
+        .map(|kind| kind.to_string())
+}
+
+fn last_nonempty_line(path: &Path) -> Option<String> {
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.seek(SeekFrom::End(0)).ok()?;
+    let start = len.saturating_sub(64 * 1024);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = String::new();
+    file.read_to_string(&mut buf).ok()?;
+    buf.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.to_string())
+}
+
+fn is_non_interactive_session(session_dir: &Path) -> bool {
+    if let Ok(text) = fs::read_to_string(session_dir.join("summary.json")) {
+        if let Ok(value) = serde_json::from_str::<Value>(&text) {
+            if let Some(kind) = value.get("session_kind").and_then(Value::as_str) {
+                let kind = kind.to_ascii_lowercase();
+                if matches!(
+                    kind.as_str(),
+                    "headless" | "single" | "non_interactive" | "non-interactive"
+                ) {
+                    return true;
+                }
+            }
+        }
+    }
+    let Ok(text) = fs::read_to_string(session_dir.join("prompt_context.json")) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    if value.get("is_non_interactive") == Some(&Value::Bool(true)) {
+        return true;
+    }
+    value
+        .get("audience")
+        .and_then(Value::as_str)
+        .is_some_and(|audience| audience.eq_ignore_ascii_case("headless"))
 }
 
 pub fn projects_from(threads: &[ThreadInfo]) -> Vec<ProjectInfo> {
@@ -83,7 +227,61 @@ pub fn projects_from(threads: &[ThreadInfo]) -> Vec<ProjectInfo> {
     map
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanDoc {
+    pub path: String,
+    pub markdown: String,
+    pub exists: bool,
+}
+
+pub fn read_plan(session_id: &str, cwd: &str) -> Result<PlanDoc, String> {
+    if !is_safe_session_id(session_id) {
+        return Err("invalid session id".into());
+    }
+    let path = find_session_dir(cwd, session_id).join("plan.md");
+    if !path.is_file() {
+        return Ok(PlanDoc {
+            path: path.display().to_string(),
+            markdown: String::new(),
+            exists: false,
+        });
+    }
+    let markdown = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    Ok(PlanDoc {
+        path: path.display().to_string(),
+        markdown,
+        exists: true,
+    })
+}
+
 pub fn hydrate_updates(session_id: &str, cwd: &str) -> Result<Vec<Value>, String> {
+    Ok(compact_updates(read_raw_updates(session_id, cwd)?))
+}
+
+pub fn load_tool_body(session_id: &str, cwd: &str, tool_call_id: &str) -> Result<Value, String> {
+    if !is_safe_session_id(session_id) {
+        return Err("invalid session id".into());
+    }
+    let mut found = json!({});
+    for update in read_raw_updates(session_id, cwd)? {
+        let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or("");
+        if kind != "tool_call" && kind != "tool_call_update" {
+            continue;
+        }
+        if update.get("toolCallId").and_then(Value::as_str) != Some(tool_call_id) {
+            continue;
+        }
+        merge_json(&mut found, &update);
+    }
+    Ok(json!({
+        "input": found.get("rawInput").cloned().unwrap_or(Value::Null),
+        "output": found.get("rawOutput").cloned().unwrap_or(Value::Null),
+        "content": found.get("content").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+fn read_raw_updates(session_id: &str, cwd: &str) -> Result<Vec<Value>, String> {
     let path = find_session_dir(cwd, session_id).join("updates.jsonl");
     if !path.is_file() {
         return Ok(Vec::new());
@@ -108,6 +306,140 @@ pub fn hydrate_updates(session_id: &str, cwd: &str) -> Result<Vec<Value>, String
         }
     }
     Ok(updates)
+}
+
+fn is_text_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "user_message_chunk" | "agent_message_chunk" | "agent_thought_chunk"
+    )
+}
+
+fn ignored_kind(kind: &str) -> bool {
+    matches!(kind, "task_backgrounded")
+}
+
+pub fn compact_updates(updates: Vec<Value>) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    let mut tool_index: HashMap<String, usize> = HashMap::new();
+    for update in updates {
+        let kind = update
+            .get("sessionUpdate")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if kind.is_empty() || ignored_kind(kind) {
+            continue;
+        }
+        if is_text_kind(kind) {
+            if let Some(last) = out.last_mut() {
+                if last.get("sessionUpdate").and_then(Value::as_str) == Some(kind) {
+                    concat_update_text(last, &update);
+                    continue;
+                }
+            }
+            out.push(update);
+            continue;
+        }
+        if kind == "tool_call" || kind == "tool_call_update" {
+            let id = update
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if !id.is_empty() {
+                if let Some(&idx) = tool_index.get(&id) {
+                    merge_json(&mut out[idx], &update);
+                    truncate_tool(&mut out[idx]);
+                    continue;
+                }
+                tool_index.insert(id, out.len());
+            }
+            let mut next = update;
+            truncate_tool(&mut next);
+            out.push(next);
+            continue;
+        }
+        out.push(update);
+    }
+    out
+}
+
+fn concat_update_text(dst: &mut Value, src: &Value) {
+    let extra = src
+        .get("content")
+        .and_then(|c| c.get("text"))
+        .and_then(Value::as_str)
+        .or_else(|| src.get("text").and_then(Value::as_str))
+        .unwrap_or("");
+    if extra.is_empty() {
+        return;
+    }
+    let Some(obj) = dst.as_object_mut() else {
+        return;
+    };
+    if let Some(content) = obj.get_mut("content") {
+        if let Some(map) = content.as_object_mut() {
+            if let Some(Value::String(text)) = map.get_mut("text") {
+                text.push_str(extra);
+                return;
+            }
+        }
+    }
+    if let Some(Value::String(text)) = obj.get_mut("text") {
+        text.push_str(extra);
+    }
+}
+
+fn merge_json(dst: &mut Value, src: &Value) {
+    let Some(src_obj) = src.as_object() else {
+        *dst = src.clone();
+        return;
+    };
+    let Some(dst_obj) = dst.as_object_mut() else {
+        *dst = src.clone();
+        return;
+    };
+    for (key, value) in src_obj {
+        if value.is_null() {
+            continue;
+        }
+        dst_obj.insert(key.clone(), value.clone());
+    }
+}
+
+fn truncate_tool(update: &mut Value) {
+    let mut clipped = false;
+    if let Some(value) = update.get_mut("rawInput") {
+        clipped |= truncate_value(value, TOOL_PREVIEW_LIMIT);
+    }
+    if let Some(value) = update.get_mut("rawOutput") {
+        clipped |= truncate_value(value, TOOL_PREVIEW_LIMIT);
+    }
+    if let Some(value) = update.get_mut("content") {
+        clipped |= truncate_value(value, TOOL_PREVIEW_LIMIT);
+    }
+    if clipped {
+        if let Some(obj) = update.as_object_mut() {
+            obj.insert("truncated".into(), Value::Bool(true));
+        }
+    }
+}
+
+fn truncate_value(value: &mut Value, limit: usize) -> bool {
+    match value {
+        Value::String(text) if text.len() > limit => {
+            let mut end = limit.min(text.len());
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            text.push('…');
+            true
+        }
+        Value::Array(items) => items.iter_mut().any(|item| truncate_value(item, limit)),
+        Value::Object(map) => map.values_mut().any(|item| truncate_value(item, limit)),
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -182,11 +514,15 @@ fn is_safe_session_id(id: &str) -> bool {
 }
 
 fn find_session_dir(cwd: &str, session_id: &str) -> PathBuf {
-    let encoded = sessions_root().join(encode_cwd(cwd)).join(session_id);
+    find_session_dir_in(&sessions_root(), cwd, session_id)
+}
+
+fn find_session_dir_in(root: &Path, cwd: &str, session_id: &str) -> PathBuf {
+    let encoded = root.join(encode_cwd(cwd)).join(session_id);
     if encoded.is_dir() {
         return encoded;
     }
-    if let Ok(groups) = fs::read_dir(sessions_root()) {
+    if let Ok(groups) = fs::read_dir(root) {
         for group in groups.flatten() {
             let candidate = group.path().join(session_id);
             if candidate.is_dir() {
@@ -253,6 +589,8 @@ fn parse_summary(path: &Path, fallback_cwd: Option<&str>) -> Option<ThreadInfo> 
             .and_then(Value::as_str)
             .map(|s| s.to_string()),
         message_count: value.get("num_messages").and_then(Value::as_u64),
+        headless: false,
+        watch_status: "done".into(),
     })
 }
 
@@ -314,6 +652,7 @@ fn project_name(cwd: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::percent_decode;
+    use std::fs;
 
     #[test]
     fn decodes_encoded_cwd() {
@@ -332,10 +671,163 @@ mod tests {
     }
 
     #[test]
+    fn skips_grok_p_headless_sessions() {
+        let root = std::env::temp_dir().join(format!("gz-ni-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let group = root.join("proj");
+        let interactive = group.join("sesslive");
+        let headless = group.join("sesshead");
+        fs::create_dir_all(&interactive).unwrap();
+        fs::create_dir_all(&headless).unwrap();
+        fs::write(group.join(".cwd"), "/tmp/demo").unwrap();
+        let summary = |id: &str| {
+            format!(
+                r#"{{"info":{{"id":"{id}","cwd":"/tmp/demo"}},"generated_title":"{id}","updated_at":"2026-01-01T00:00:00Z"}}"#
+            )
+        };
+        fs::write(interactive.join("summary.json"), summary("sesslive")).unwrap();
+        fs::write(headless.join("summary.json"), summary("sesshead")).unwrap();
+        fs::write(
+            interactive.join("prompt_context.json"),
+            r#"{"is_non_interactive":false}"#,
+        )
+        .unwrap();
+        fs::write(
+            headless.join("prompt_context.json"),
+            r#"{"is_non_interactive":true}"#,
+        )
+        .unwrap();
+        fs::write(
+            headless.join("updates.jsonl"),
+            "{\"params\":{\"update\":{\"sessionUpdate\":\"turn_completed\"}}}\n",
+        )
+        .unwrap();
+        let threads = super::list_threads_in(&root).unwrap();
+        let live = threads.iter().find(|t| t.session_id == "sesslive").unwrap();
+        let head = threads.iter().find(|t| t.session_id == "sesshead").unwrap();
+        assert!(!live.headless);
+        assert!(head.headless);
+        assert_eq!(head.watch_status, "done");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn watch_status_is_done_after_turn_completed() {
+        let dir = std::env::temp_dir().join(format!("gz-watch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("updates.jsonl"),
+            "{\"params\":{\"update\":{\"sessionUpdate\":\"agent_message_chunk\"}}}\n{\"params\":{\"update\":{\"sessionUpdate\":\"turn_completed\"}}}\n",
+        )
+        .unwrap();
+        fs::write(dir.join("summary.json"), "{}").unwrap();
+        assert_eq!(super::watch_status(&dir), "done");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn treats_headless_session_kind_as_non_interactive() {
+        let root = std::env::temp_dir().join(format!("gz-hk-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("proj").join("sesshead");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("summary.json"),
+            r#"{"info":{"id":"sesshead","cwd":"/tmp/demo"},"session_kind":"headless"}"#,
+        )
+        .unwrap();
+        assert!(super::is_non_interactive_session(&dir));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_plan_rejects_unsafe_ids() {
+        let err = super::read_plan("../etc", "/tmp").unwrap_err();
+        assert!(err.contains("invalid"));
+    }
+
+    #[test]
     fn rejects_unsafe_session_ids() {
         assert!(!super::is_safe_session_id("../etc"));
         assert!(!super::is_safe_session_id("a/b"));
         assert!(super::is_safe_session_id("01a07ece-f6f9-7d61-930f-cc789f20cae6"));
+    }
+
+    #[test]
+    fn finds_thread_by_session_id() {
+        let root = std::env::temp_dir().join(format!("gz-find-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("proj").join("01sess-find-me");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(root.join("proj").join(".cwd"), "/tmp/demo").unwrap();
+        fs::write(
+            dir.join("summary.json"),
+            r#"{"info":{"id":"01sess-find-me","cwd":"/tmp/demo"},"generated_title":"Found me","updated_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("prompt_context.json"),
+            r#"{"is_non_interactive":true}"#,
+        )
+        .unwrap();
+        let thread = super::find_thread_in(&root, "01sess-find-me").unwrap();
+        assert_eq!(thread.session_id, "01sess-find-me");
+        assert_eq!(thread.cwd, "/tmp/demo");
+        assert_eq!(thread.title.as_deref(), Some("Found me"));
+        assert!(thread.headless);
+        assert!(super::find_thread_in(&root, "../etc").is_err());
+        assert!(super::find_thread_in(&root, "missing-session").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn compact_merges_chunks_and_tools() {
+        let updates = vec![
+            serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "Hello" }
+            }),
+            serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": " world" }
+            }),
+            serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "t1",
+                "title": "read",
+                "status": "pending"
+            }),
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "t1",
+                "status": "completed",
+                "rawOutput": { "text": "ok" }
+            }),
+            serde_json::json!({ "sessionUpdate": "turn_completed" }),
+        ];
+        let compact = super::compact_updates(updates);
+        assert_eq!(compact.len(), 3);
+        assert_eq!(compact[2]["sessionUpdate"], "turn_completed");
+        assert_eq!(compact[0]["content"]["text"], "Hello world");
+        assert_eq!(compact[1]["status"], "completed");
+        assert_eq!(compact[1]["rawOutput"]["text"], "ok");
+        assert_eq!(compact[1]["title"], "read");
+    }
+
+    #[test]
+    fn compact_truncates_large_tool_output() {
+        let big = "x".repeat(6000);
+        let updates = vec![serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "t1",
+            "rawOutput": { "text": big }
+        })];
+        let compact = super::compact_updates(updates);
+        assert_eq!(compact[0]["truncated"], true);
+        let text = compact[0]["rawOutput"]["text"].as_str().unwrap();
+        assert!(text.len() < 5000);
+        assert!(text.ends_with('…'));
     }
 
     #[test]

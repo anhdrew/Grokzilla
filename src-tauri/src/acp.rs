@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -87,23 +88,55 @@ impl AcpClient {
         let reader_inner = inner.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
+            let mut pending: Option<AcpEvent> = None;
+            let mut since = Instant::now();
             loop {
-                match lines.next_line().await {
-                    Ok(Some(line)) => {
+                let next = tokio::time::timeout(Duration::from_millis(16), lines.next_line()).await;
+                match next {
+                    Ok(Ok(Some(line))) => {
                         if line.trim().is_empty() {
                             continue;
                         }
-                        handle_line(&reader_inner, &line).await;
+                        if let Some(event) = handle_line(&reader_inner, &line).await {
+                            if is_urgent_event(&event) {
+                                if let Some(prev) = pending.take() {
+                                    emit_event(&reader_inner, prev);
+                                }
+                                emit_event(&reader_inner, event);
+                                since = Instant::now();
+                            } else if let Some(prev) = pending.as_mut() {
+                                if !merge_text_event(prev, &event) {
+                                    emit_event(&reader_inner, pending.take().unwrap());
+                                    pending = Some(event);
+                                    since = Instant::now();
+                                } else if since.elapsed() >= Duration::from_millis(16) {
+                                    emit_event(&reader_inner, pending.take().unwrap());
+                                    since = Instant::now();
+                                }
+                            } else {
+                                pending = Some(event);
+                                since = Instant::now();
+                            }
+                        }
                     }
-                    Ok(None) => break,
-                    Err(_) => break,
+                    Ok(Ok(None)) => break,
+                    Ok(Err(_)) => break,
+                    Err(_) => {
+                        if let Some(prev) = pending.take() {
+                            emit_event(&reader_inner, prev);
+                        }
+                        since = Instant::now();
+                    }
                 }
+            }
+            if let Some(prev) = pending.take() {
+                emit_event(&reader_inner, prev);
             }
             if reader_inner.shutting_down.load(Ordering::SeqCst) {
                 return;
             }
-            let _ = reader_inner.app.emit(
-                "acp-event",
+            emit_event(
+                &reader_inner,
                 AcpEvent {
                     kind: "exit".into(),
                     session_id: None,
@@ -117,8 +150,13 @@ impl AcpClient {
         let log_app = app.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
+            let verbose = std::env::var_os("GROKZILLA_ACP_LOG").is_some();
             while let Ok(Some(line)) = lines.next_line().await {
-                let _ = log_app.emit(
+                if !verbose {
+                    continue;
+                }
+                let _ = log_app.emit_to(
+                    "main",
                     "acp-event",
                     AcpEvent {
                         kind: "log".into(),
@@ -347,21 +385,146 @@ impl AcpClient {
     }
 }
 
-async fn handle_line(inner: &Arc<AcpInner>, line: &str) {
+fn emit_event(inner: &AcpInner, event: AcpEvent) {
+    let _ = inner.app.emit_to("main", "acp-event", event);
+}
+
+fn is_urgent_event(event: &AcpEvent) -> bool {
+    if event.kind == "permission" || event.kind == "exit" || event.kind == "error" {
+        return true;
+    }
+    if event.kind != "update" {
+        return false;
+    }
+    matches!(
+        event.payload.get("sessionUpdate").and_then(Value::as_str),
+        Some(
+            "tool_call"
+                | "tool_call_update"
+                | "plan"
+                | "current_mode_update"
+                | "available_commands_update"
+                | "config_option_update"
+        )
+    )
+}
+
+fn text_of_payload(value: &Value) -> String {
+    value
+        .get("content")
+        .and_then(|content| content.get("text"))
+        .and_then(Value::as_str)
+        .or_else(|| value.get("text").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_string()
+}
+
+fn concat_text_payload(dst: &mut Value, src: &Value) {
+    let extra = text_of_payload(src);
+    if extra.is_empty() {
+        return;
+    }
+    let Some(obj) = dst.as_object_mut() else {
+        return;
+    };
+    if let Some(content) = obj.get_mut("content") {
+        if let Some(map) = content.as_object_mut() {
+            if let Some(Value::String(text)) = map.get_mut("text") {
+                text.push_str(&extra);
+                return;
+            }
+        }
+    }
+    if let Some(Value::String(text)) = obj.get_mut("text") {
+        text.push_str(&extra);
+    }
+}
+
+fn merge_text_event(dst: &mut AcpEvent, src: &AcpEvent) -> bool {
+    if dst.kind != "update" || src.kind != "update" || dst.session_id != src.session_id {
+        return false;
+    }
+    let left = dst.payload.get("sessionUpdate").and_then(Value::as_str);
+    let right = src.payload.get("sessionUpdate").and_then(Value::as_str);
+    if left != right {
+        return false;
+    }
+    if !matches!(
+        left,
+        Some("agent_message_chunk" | "agent_thought_chunk" | "user_message_chunk")
+    ) {
+        return false;
+    }
+    concat_text_payload(&mut dst.payload, &src.payload);
+    true
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::{concat_text_payload, merge_text_event, AcpEvent};
+    use serde_json::json;
+
+    #[test]
+    fn concatenates_consecutive_assistant_chunks() {
+        let mut first = AcpEvent {
+            kind: "update".into(),
+            session_id: Some("s1".into()),
+            method: Some("session/update".into()),
+            id: None,
+            payload: json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "Hello" }
+            }),
+        };
+        let second = AcpEvent {
+            kind: "update".into(),
+            session_id: Some("s1".into()),
+            method: Some("session/update".into()),
+            id: None,
+            payload: json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": " world" }
+            }),
+        };
+        assert!(merge_text_event(&mut first, &second));
+        assert_eq!(
+            first.payload["content"]["text"].as_str(),
+            Some("Hello world")
+        );
+    }
+
+    #[test]
+    fn does_not_merge_tool_calls() {
+        let mut first = AcpEvent {
+            kind: "update".into(),
+            session_id: Some("s1".into()),
+            method: None,
+            id: None,
+            payload: json!({ "sessionUpdate": "tool_call", "toolCallId": "1" }),
+        };
+        let second = AcpEvent {
+            kind: "update".into(),
+            session_id: Some("s1".into()),
+            method: None,
+            id: None,
+            payload: json!({ "sessionUpdate": "tool_call", "toolCallId": "2" }),
+        };
+        assert!(!merge_text_event(&mut first, &second));
+        let _ = concat_text_payload;
+    }
+}
+
+async fn handle_line(inner: &Arc<AcpInner>, line: &str) -> Option<AcpEvent> {
     let value: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(err) => {
-            let _ = inner.app.emit(
-                "acp-event",
-                AcpEvent {
-                    kind: "error".into(),
-                    session_id: None,
-                    method: None,
-                    id: None,
-                    payload: json!({ "message": format!("invalid json from agent: {err}"), "line": line }),
-                },
-            );
-            return;
+            return Some(AcpEvent {
+                kind: "error".into(),
+                session_id: None,
+                method: None,
+                id: None,
+                payload: json!({ "message": format!("invalid json from agent: {err}"), "line": line }),
+            });
         }
     };
 
@@ -386,7 +549,7 @@ async fn handle_line(inner: &Arc<AcpInner>, line: &str) {
                     Ok(value.get("result").cloned().unwrap_or(Value::Null))
                 };
                 let _ = pending.tx.send(result);
-                return;
+                return None;
             }
         }
     }
@@ -400,17 +563,13 @@ async fn handle_line(inner: &Arc<AcpInner>, line: &str) {
 
         if let Some(id) = id {
             if method == "session/request_permission" {
-                let _ = inner.app.emit(
-                    "acp-event",
-                    AcpEvent {
-                        kind: "permission".into(),
-                        session_id,
-                        method: Some(method.to_string()),
-                        id: Some(id),
-                        payload: params,
-                    },
-                );
-                return;
+                return Some(AcpEvent {
+                    kind: "permission".into(),
+                    session_id,
+                    method: Some(method.to_string()),
+                    id: Some(id),
+                    payload: params,
+                });
             }
 
             // Unknown incoming request: cancel rather than hang the agent.
@@ -424,7 +583,7 @@ async fn handle_line(inner: &Arc<AcpInner>, line: &str) {
             let mut stdin = inner.stdin.lock().await;
             let _ = stdin.write_all(&line).await;
             let _ = stdin.flush().await;
-            return;
+            return None;
         }
 
         let kind = if method == "session/update" {
@@ -437,15 +596,13 @@ async fn handle_line(inner: &Arc<AcpInner>, line: &str) {
         } else {
             params
         };
-        let _ = inner.app.emit(
-            "acp-event",
-            AcpEvent {
-                kind: kind.into(),
-                session_id,
-                method: Some(method.to_string()),
-                id: None,
-                payload,
-            },
-        );
+        return Some(AcpEvent {
+            kind: kind.into(),
+            session_id,
+            method: Some(method.to_string()),
+            id: None,
+            payload,
+        });
     }
+    None
 }

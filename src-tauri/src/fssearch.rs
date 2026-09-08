@@ -1,5 +1,6 @@
 use ignore::WalkBuilder;
 use serde::Serialize;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize)]
@@ -94,21 +95,18 @@ pub fn list_dir(cwd: &str, rel: &str) -> Result<Vec<PathHit>, String> {
     }
 
     let mut hits = Vec::new();
-    let mut builder = WalkBuilder::new(&dir_canon);
-    builder
-        .hidden(true)
-        .git_ignore(true)
-        .git_exclude(true)
-        .parents(true)
-        .follow_links(false)
-        .max_depth(Some(1));
-    for result in builder.build() {
-        let Ok(entry) = result else { continue };
-        let path = entry.path();
-        if path == dir_canon {
+    let entries = match fs::read_dir(&dir_canon) {
+        Ok(d) => d,
+        Err(_) => return Ok(Vec::new()),
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') {
             continue;
         }
-        let rel_path = path.strip_prefix(&root_canon).unwrap_or(path);
+        let path = entry.path();
+        let rel_path = path.strip_prefix(&root_canon).unwrap_or(&path);
         let rel_str = rel_path.to_string_lossy().replace('\\', "/");
         if rel_str.is_empty() {
             continue;

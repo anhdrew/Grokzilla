@@ -1,7 +1,28 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Attachment, GrokStatus, PathHit, ProjectInfo, SkillInfo, ThreadInfo, ThreadStats } from "./types";
+import type {
+  Attachment,
+  GrokStatus,
+  PathHit,
+  PlanDoc,
+  ProjectInfo,
+  SkillInfo,
+  ThreadInfo,
+  ThreadStats,
+} from "./types";
 
 export type SavedDrop = { path: string; rel: string };
+
+const DIR_TTL_MS = 5_000;
+const dirCache = new Map<string, { at: number; rows: PathHit[] }>();
+
+async function listDirCached(cwd: string, rel: string): Promise<PathHit[]> {
+  const key = `${cwd}\0${rel}`;
+  const hit = dirCache.get(key);
+  if (hit && Date.now() - hit.at < DIR_TTL_MS) return hit.rows;
+  const rows = await invoke<PathHit[]>("list_dir", { cwd, rel });
+  dirCache.set(key, { at: Date.now(), rows });
+  return rows;
+}
 
 export const api = {
   grokStatus: () => invoke<GrokStatus>("grok_status"),
@@ -11,8 +32,19 @@ export const api = {
   startLogin: () => invoke<GrokStatus>("start_login"),
   listThreads: () => invoke<ThreadInfo[]>("list_threads"),
   listProjects: () => invoke<ProjectInfo[]>("list_projects"),
+  listSidebar: () =>
+    invoke<{ threads: ThreadInfo[]; projects: ProjectInfo[] }>("list_sidebar"),
+  findThread: (sessionId: string) => invoke<ThreadInfo>("find_thread", { sessionId }),
   hydrateSession: (sessionId: string, cwd: string) =>
     invoke<Record<string, unknown>[]>("hydrate_session", { sessionId, cwd }),
+  loadToolBody: (sessionId: string, cwd: string, toolCallId: string) =>
+    invoke<{ output?: unknown; content?: unknown; input?: unknown }>("load_tool_body", {
+      sessionId,
+      cwd,
+      toolCallId,
+    }),
+  readPlan: (sessionId: string, cwd: string) =>
+    invoke<PlanDoc>("read_plan", { sessionId, cwd }),
   threadStats: (sessionId: string, cwd: string) =>
     invoke<ThreadStats>("thread_stats", { sessionId, cwd }),
   deleteThread: (sessionId: string, cwd: string) =>
@@ -28,7 +60,7 @@ export const api = {
     invoke<Record<string, unknown>>("send_prompt", { sessionId, text, attachments }),
   searchPaths: (cwd: string, query: string) =>
     invoke<PathHit[]>("search_paths", { cwd, query }),
-  listDir: (cwd: string, rel = "") => invoke<PathHit[]>("list_dir", { cwd, rel }),
+  listDir: (cwd: string, rel = "") => listDirCached(cwd, rel),
   listSkills: (cwd: string) => invoke<SkillInfo[]>("list_skills", { cwd }),
   getBilling: () => invoke<Record<string, unknown>>("get_billing"),
   saveDrop: (name: string, dataBase64: string) =>
@@ -42,4 +74,6 @@ export const api = {
     invoke<Record<string, unknown>>("set_config_option", { sessionId, configId, value }),
   respondPermission: (id: number, optionId?: string, cancelled = false) =>
     invoke<void>("respond_permission", { id, optionId, cancelled }),
+  openInTerminal: (sessionId: string, cwd: string) =>
+    invoke<void>("open_in_terminal", { sessionId, cwd }),
 };

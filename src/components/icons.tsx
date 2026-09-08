@@ -76,6 +76,31 @@ export function IconTrash({ className = "tree-ico" }: IconProps) {
   );
 }
 
+export function IconTerminal({ className = "tree-ico" }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden>
+      <rect
+        x="2.2"
+        y="3.2"
+        width="11.6"
+        height="9.6"
+        rx="1.2"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+      />
+      <path
+        d="M4.6 6.2 6.6 8 4.6 9.8M8.2 10.2h3.2"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export function IconUnarchive({ className = "tree-ico" }: IconProps) {
   return (
     <svg className={className} viewBox="0 0 16 16" aria-hidden>

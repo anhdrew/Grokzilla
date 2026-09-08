@@ -8,7 +8,7 @@ use acp::AcpClient;
 use grok::GrokStatus;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sessions::{ProjectInfo, ThreadInfo, ThreadStats};
+use sessions::{PlanDoc, ProjectInfo, ThreadInfo, ThreadStats};
 use std::sync::Arc;
 use tauri::State;
 use tokio::sync::Mutex;
@@ -63,36 +63,103 @@ async fn authenticate(state: State<'_, AppState>, method_id: String) -> Result<V
 }
 
 #[tauri::command]
+async fn open_in_terminal(session_id: String, cwd: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || grok::open_session_in_terminal(&session_id, &cwd))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn start_login() -> Result<GrokStatus, String> {
     let grok = grok::find_grok().ok_or_else(|| "Grok Build CLI was not found".to_string())?;
     grok::start_login(&grok).await?;
     Ok(grok::status())
 }
 
-#[tauri::command]
-fn list_threads() -> Result<Vec<ThreadInfo>, String> {
-    sessions::list_threads()
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SidebarLists {
+    threads: Vec<ThreadInfo>,
+    projects: Vec<ProjectInfo>,
 }
 
 #[tauri::command]
-fn list_projects() -> Result<Vec<ProjectInfo>, String> {
-    let threads = sessions::list_threads()?;
-    Ok(sessions::projects_from(&threads))
+async fn list_sidebar() -> Result<SidebarLists, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let threads = sessions::list_threads()?;
+        let projects = sessions::projects_from(&threads);
+        Ok(SidebarLists { threads, projects })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn hydrate_session(session_id: String, cwd: String) -> Result<Vec<Value>, String> {
-    sessions::hydrate_updates(&session_id, &cwd)
+async fn list_threads() -> Result<Vec<ThreadInfo>, String> {
+    tauri::async_runtime::spawn_blocking(sessions::list_threads)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn thread_stats(session_id: String, cwd: String) -> Result<ThreadStats, String> {
-    sessions::thread_stats(&session_id, &cwd)
+async fn list_projects() -> Result<Vec<ProjectInfo>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let threads = sessions::list_threads()?;
+        Ok(sessions::projects_from(&threads))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn delete_thread(session_id: String, cwd: String) -> Result<(), String> {
-    sessions::delete_thread(&session_id, &cwd)
+async fn find_thread(session_id: String) -> Result<ThreadInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::find_thread(&session_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn hydrate_session(session_id: String, cwd: String) -> Result<Vec<Value>, String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::hydrate_updates(&session_id, &cwd))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn read_plan(session_id: String, cwd: String) -> Result<PlanDoc, String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::read_plan(&session_id, &cwd))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn load_tool_body(
+    session_id: String,
+    cwd: String,
+    tool_call_id: String,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        sessions::load_tool_body(&session_id, &cwd, &tool_call_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn thread_stats(session_id: String, cwd: String) -> Result<ThreadStats, String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::thread_stats(&session_id, &cwd))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn delete_thread(session_id: String, cwd: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        sessions::reject_live_headless(&session_id, &cwd)?;
+        sessions::delete_thread(&session_id, &cwd)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize)]
@@ -128,6 +195,7 @@ async fn load_session(
     session_id: String,
     cwd: String,
 ) -> Result<SessionStart, String> {
+    sessions::reject_non_interactive(&session_id, &cwd)?;
     let slot = state.client.lock().await;
     let client = require_client(&slot)?;
     drop(slot);
@@ -175,19 +243,27 @@ async fn send_prompt(
 }
 
 #[tauri::command]
-fn search_paths(cwd: String, query: String) -> Result<Vec<fssearch::PathHit>, String> {
-    let hidden = query.starts_with('!');
-    fssearch::search(&cwd, &query, hidden)
+async fn search_paths(cwd: String, query: String) -> Result<Vec<fssearch::PathHit>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let hidden = query.starts_with('!');
+        fssearch::search(&cwd, &query, hidden)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn list_dir(cwd: String, rel: String) -> Result<Vec<fssearch::PathHit>, String> {
-    fssearch::list_dir(&cwd, &rel)
+async fn list_dir(cwd: String, rel: String) -> Result<Vec<fssearch::PathHit>, String> {
+    tauri::async_runtime::spawn_blocking(move || fssearch::list_dir(&cwd, &rel))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn list_skills(cwd: String) -> Vec<skills::SkillInfo> {
-    skills::list_skills(&cwd)
+async fn list_skills(cwd: String) -> Result<Vec<skills::SkillInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || skills::list_skills(&cwd))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -282,9 +358,14 @@ pub fn run() {
             start_agent,
             authenticate,
             start_login,
+            open_in_terminal,
+            list_sidebar,
             list_threads,
             list_projects,
+            find_thread,
             hydrate_session,
+            read_plan,
+            load_tool_body,
             thread_stats,
             delete_thread,
             new_session,

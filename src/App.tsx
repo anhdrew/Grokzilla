@@ -1,23 +1,30 @@
-import { useEffect, useRef, type DragEvent, type MouseEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, type DragEvent, type MouseEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Composer } from "./components/Composer";
 import { Explorer } from "./components/Explorer";
+import { PlanChip, PlanPanel } from "./components/PlanPanel";
 import { Sidebar } from "./components/Sidebar";
 import { TranscriptView } from "./components/Transcript";
 import { getExplorerDrag, hasExplorerDrag } from "./lib/explorer-drag";
-import { compactNumber, projectName, previewJson } from "./lib/format";
+import { compactNumber, isReadOnlySession, projectName, previewJson } from "./lib/format";
+import { isPlanPermission } from "./lib/plan";
 import { useApp } from "./lib/store";
 import { estimateEmptyAt, formatLocalStamp } from "./lib/usage";
 import type { AcpEvent } from "./lib/types";
 import "./styles.css";
 
 export default function App() {
-  const app = useApp();
+  const status = useApp((s) => s.status);
+  const theme = useApp((s) => s.theme);
+  const bootError = useApp((s) => s.bootError);
+  const explorerOpen = useApp((s) => s.explorerOpen);
+  const bootstrap = useApp((s) => s.bootstrap);
+  const login = useApp((s) => s.login);
 
   useEffect(() => {
     document.documentElement.dataset.theme = useApp.getState().theme;
-    void app.bootstrap();
+    void useApp.getState().bootstrap();
     let unlisten: (() => void) | undefined;
     void listen<AcpEvent>("acp-event", (event) => {
       useApp.getState().handleEvent(event.payload);
@@ -25,8 +32,6 @@ export default function App() {
       unlisten = fn;
     });
     return () => unlisten?.();
-    // bootstrap once on mount
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -41,17 +46,22 @@ export default function App() {
         state.setExplorerOpen(!state.explorerOpen);
       }
       if (event.key === "Escape") {
-        void useApp.getState().stop();
+        const state = useApp.getState();
+        if (state.planPanelOpen || state.planReviewOpen) {
+          event.preventDefault();
+          state.closePlanPanel();
+          return;
+        }
+        void state.stop();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const status = app.status;
   if (!status) {
     return (
-      <div className="onboarding" data-theme={app.theme}>
+      <div className="onboarding" data-theme={theme}>
         <div className="window-drag" data-tauri-drag-region="deep" onMouseDown={onWindowDrag} />
         <div className="card">
           <span className="logo">G</span>
@@ -63,7 +73,7 @@ export default function App() {
   }
   if (!status.grokPath) {
     return (
-      <div className="onboarding" data-theme={app.theme}>
+      <div className="onboarding" data-theme={theme}>
         <div className="window-drag" data-tauri-drag-region="deep" onMouseDown={onWindowDrag} />
         <div className="card">
           <span className="logo">G</span>
@@ -71,7 +81,7 @@ export default function App() {
           <p>Grokzilla is a desktop client for the Grok Build CLI. It does not bundle the agent.</p>
           <pre className="code">curl -fsSL https://x.ai/cli/install.sh | bash</pre>
           <p>Then click retry.</p>
-          <button className="primary" onClick={() => void app.bootstrap()}>
+          <button className="primary" onClick={() => void bootstrap()}>
             Retry
           </button>
         </div>
@@ -80,7 +90,7 @@ export default function App() {
   }
   if (!status.loggedIn) {
     return (
-      <div className="onboarding" data-theme={app.theme}>
+      <div className="onboarding" data-theme={theme}>
         <div className="window-drag" data-tauri-drag-region="deep" onMouseDown={onWindowDrag} />
         <div className="card">
           <span className="logo">G</span>
@@ -89,7 +99,7 @@ export default function App() {
             Found {status.version ?? "Grok Build"} at {status.grokPath}. Sign in with the same
             account the TUI uses.
           </p>
-          <button className="primary" onClick={() => void app.login()}>
+          <button className="primary" onClick={() => void login()}>
             Sign in
           </button>
         </div>
@@ -98,13 +108,13 @@ export default function App() {
   }
 
   return (
-    <div className="app" data-theme={app.theme}>
+    <div className="app" data-theme={theme}>
       <Titlebar />
-      {app.bootError ? <div className="banner">{app.bootError}</div> : null}
-      <div className={`workspace ${app.explorerOpen ? "" : "no-explorer"}`}>
+      {bootError ? <div className="banner">{bootError}</div> : null}
+      <div className={`workspace ${explorerOpen ? "" : "no-explorer"}`}>
         <Sidebar />
         <ChatPane />
-        {app.explorerOpen ? <Explorer /> : null}
+        {explorerOpen ? <Explorer /> : null}
       </div>
     </div>
   );
@@ -181,7 +191,20 @@ function UsagePill() {
 }
 
 function Titlebar() {
-  const app = useApp();
+  const version = useApp((s) => s.status?.version);
+  const starting = useApp((s) => s.starting);
+  const working = useApp((s) => {
+    if (s.sending) return true;
+    const thread = s.threads.find((item) => item.sessionId === s.selectedSession);
+    if (!thread) return false;
+    if (!isReadOnlySession(s.selectedSession, s.threads, s.readOnlyIds)) return false;
+    return thread.watchStatus === "running";
+  });
+  const mcpNote = useApp((s) => s.mcpNote);
+  const theme = useApp((s) => s.theme);
+  const explorerOpen = useApp((s) => s.explorerOpen);
+  const setTheme = useApp((s) => s.setTheme);
+  const setExplorerOpen = useApp((s) => s.setExplorerOpen);
   return (
     <div className="titlebar" data-tauri-drag-region="deep" onMouseDown={onWindowDrag}>
       <div className="titlebar-left" data-tauri-drag-region="deep">
@@ -192,17 +215,23 @@ function Titlebar() {
           Grokzilla
         </span>
         <span className="pill" data-tauri-drag-region="deep">
-          {app.status?.version ?? "Grok Build"}
+          {version ?? "Grok Build"}
         </span>
         <UsagePill />
-        {app.starting ? (
+        {starting ? (
           <span className="pill" data-tauri-drag-region="deep">
             connecting…
           </span>
         ) : null}
-        {app.mcpNote ? (
+        {working ? (
+          <span className="pill working" data-tauri-drag-region="deep">
+            <span className="act-dot running" />
+            working
+          </span>
+        ) : null}
+        {mcpNote ? (
           <span className="pill" data-tauri-drag-region="deep">
-            {app.mcpNote}
+            {mcpNote}
           </span>
         ) : null}
       </div>
@@ -210,16 +239,16 @@ function Titlebar() {
         <button
           className="icon-btn"
           data-tauri-drag-region="false"
-          title={app.theme === "light" ? "Cursor-style dark" : "Codex-style light"}
-          onClick={() => app.setTheme(app.theme === "light" ? "dark" : "light")}
+          title={theme === "light" ? "Cursor-style dark" : "Codex-style light"}
+          onClick={() => setTheme(theme === "light" ? "dark" : "light")}
         >
-          {app.theme === "light" ? "☾" : "☀"}
+          {theme === "light" ? "☾" : "☀"}
         </button>
         <button
           className="icon-btn"
           data-tauri-drag-region="false"
           title="Toggle project explorer"
-          onClick={() => app.setExplorerOpen(!app.explorerOpen)}
+          onClick={() => setExplorerOpen(!explorerOpen)}
         >
           ▥
         </button>
@@ -229,16 +258,90 @@ function Titlebar() {
 }
 
 function ChatPane() {
-  const app = useApp();
-  const sessionId = app.selectedSession;
-  const transcript = sessionId ? app.transcripts[sessionId] : undefined;
+  const selectedCwd = useApp((s) => s.selectedCwd);
+  const selectedSession = useApp((s) => s.selectedSession);
+  const blocks = useApp((s) => {
+    const id = s.selectedSession;
+    return id ? s.transcripts[id]?.blocks : undefined;
+  });
+  const sending = useApp((s) => s.sending);
+  const isHeadless = useApp((s) =>
+    Boolean(s.threads.find((item) => item.sessionId === s.selectedSession)?.headless),
+  );
+  const readOnly = useApp((s) => isReadOnlySession(s.selectedSession, s.threads, s.readOnlyIds));
+  const watchStatus = useApp((s) => {
+    if (!isReadOnlySession(s.selectedSession, s.threads, s.readOnlyIds)) return undefined;
+    return s.threads.find((item) => item.sessionId === s.selectedSession)?.watchStatus;
+  });
+  const refreshHeadlessWatch = useApp((s) => s.refreshHeadlessWatch);
+  const permission = useApp((s) => s.permission);
+  const answerPermission = useApp((s) => s.answerPermission);
+  const title = useApp((s) => {
+    const thread = s.threads.find((t) => t.sessionId === s.selectedSession);
+    return thread?.title || "Thread";
+  });
   const scroller = useRef<HTMLDivElement>(null);
+  const stick = useRef(true);
+  const restoring = useRef(false);
+  const userIntent = useRef(false);
+
+  function pinBottom() {
+    const el = scroller.current;
+    if (!el || !stick.current) return;
+    restoring.current = true;
+    el.scrollTop = el.scrollHeight;
+    requestAnimationFrame(() => {
+      const node = scroller.current;
+      if (node && stick.current) node.scrollTop = node.scrollHeight;
+      restoring.current = false;
+    });
+  }
+
+  useLayoutEffect(() => {
+    stick.current = true;
+    pinBottom();
+  }, [selectedSession]);
+
+  useLayoutEffect(() => {
+    pinBottom();
+  }, [blocks, sending, watchStatus]);
+
+  useEffect(() => {
+    if (!readOnly) return;
+    void refreshHeadlessWatch();
+    const ms = watchStatus === "running" ? 1500 : 10_000;
+    const handle = window.setInterval(() => void refreshHeadlessWatch(), ms);
+    return () => window.clearInterval(handle);
+  }, [readOnly, selectedSession, watchStatus, refreshHeadlessWatch]);
 
   useEffect(() => {
     const el = scroller.current;
     if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, [transcript?.blocks.length, app.sending]);
+    const markUser = () => {
+      userIntent.current = true;
+    };
+    const onScroll = () => {
+      if (restoring.current) return;
+      if (!userIntent.current) return;
+      userIntent.current = false;
+      stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 96;
+    };
+    el.addEventListener("wheel", markUser, { passive: true });
+    el.addEventListener("touchmove", markUser, { passive: true });
+    el.addEventListener("pointerdown", markUser);
+    el.addEventListener("scroll", onScroll, { passive: true });
+    const stack = el.firstElementChild;
+    const ro = new ResizeObserver(() => pinBottom());
+    if (stack) ro.observe(stack);
+    pinBottom();
+    return () => {
+      el.removeEventListener("wheel", markUser);
+      el.removeEventListener("touchmove", markUser);
+      el.removeEventListener("pointerdown", markUser);
+      el.removeEventListener("scroll", onScroll);
+      ro.disconnect();
+    };
+  }, [selectedCwd, selectedSession]);
 
   function onChatDragOver(event: DragEvent) {
     if (hasExplorerDrag(event.dataTransfer) || event.dataTransfer.types.includes("Files")) {
@@ -258,13 +361,16 @@ function ChatPane() {
     });
   }
 
-  if (!app.selectedCwd) {
+  if (!selectedCwd) {
     return (
       <main className="chat">
         <div className="empty">
           <div className="empty-card">
             <h2>Open a project</h2>
-            <p>Pick a folder on the left. Grokzilla uses the same sessions as Grok Build in the terminal.</p>
+            <p>
+              Pick a folder on the left, or paste a session id to open it read-only. Grokzilla uses
+              the same sessions as Grok Build in the terminal.
+            </p>
           </div>
         </div>
       </main>
@@ -274,39 +380,92 @@ function ChatPane() {
   return (
     <main className="chat" onDragOver={onChatDragOver} onDrop={onChatDrop}>
       <div className="chat-head">
-        <h1>{transcript?.blocks.length ? threadTitle(app) : projectName(app.selectedCwd)}</h1>
+        <h1>{blocks?.length ? title : projectName(selectedCwd)}</h1>
+        {selectedSession ? (
+          <button
+            type="button"
+            className="pill session-id-pill"
+            title={`${selectedSession} — click to copy`}
+            onClick={() => void navigator.clipboard.writeText(selectedSession)}
+          >
+            {selectedSession.slice(0, 8)}
+          </button>
+        ) : null}
+        {isHeadless ? (
+          <span
+            className={`pill ${watchStatus === "running" ? "working" : ""}`}
+            title="grok -p session — watched read-only"
+          >
+            {watchStatus === "running" ? (
+              <>
+                <span className="act-dot running" />
+                grok -p
+              </>
+            ) : (
+              "grok -p · done"
+            )}
+          </span>
+        ) : readOnly ? (
+          <span
+            className={`pill ${watchStatus === "running" ? "working" : ""}`}
+            title="Opened read-only from disk — Grokzilla will not attach"
+          >
+            {watchStatus === "running" ? (
+              <>
+                <span className="act-dot running" />
+                read-only
+              </>
+            ) : (
+              "read-only"
+            )}
+          </span>
+        ) : null}
+        <PlanChip />
         <ThreadStatsBar />
       </div>
       <div className="transcript" ref={scroller}>
-        <div className="stack">
-          {!transcript?.blocks.length ? (
+        <div className={`stack ${blocks?.length ? "has-turns" : ""}`}>
+          {!blocks?.length ? (
             <div className="empty">
               <div className="empty-card">
-                <h2>What should we work on?</h2>
-                <p>Ask Grok to explore the repo, fix a bug, or plan a change. Approvals stay in Ask mode unless you switch.</p>
+                <h2>
+                  {isHeadless
+                    ? "Watching grok -p"
+                    : readOnly
+                      ? "Read-only session"
+                      : "What should we work on?"}
+                </h2>
+                <p>
+                  {isHeadless
+                    ? "Status and results show up as the headless run writes them. Grokzilla will not attach to this session."
+                    : readOnly
+                      ? "This transcript is loaded from disk. Grokzilla will not attach, so a live TUI or grok -p run stays untouched."
+                      : "Ask Grok to explore the repo, fix a bug, or plan a change. Approvals stay in Ask mode unless you switch."}
+                </p>
               </div>
             </div>
           ) : (
-            <TranscriptView blocks={transcript.blocks} />
+            <TranscriptView blocks={blocks} />
           )}
+          <WorkingLine />
         </div>
       </div>
       <div className="composer-wrap">
-        {app.permission ? (
+        {permission && !readOnly && !isPlanPermission(permission) ? (
           <div className="permission">
-            <h3>{app.permission.title || "Permission required"}</h3>
-            <p>{previewJson(app.permission.toolCall ?? app.permission.raw, 400)}</p>
+            <h3>{permission.title || "Permission required"}</h3>
+            <p>{previewJson(permission.toolCall ?? permission.raw, 400)}</p>
             <div className="perm-actions">
-              {app.permission.options.map((option) => (
+              {permission.options.map((option) => (
                 <button
                   key={option.optionId}
                   className={option.kind?.includes("reject") ? "danger" : "primary"}
-                  onClick={() => void app.answerPermission(option.optionId)}
+                  onClick={() => void answerPermission(option.optionId)}
                 >
                   {option.name}
                 </button>
               ))}
-              <button className="ghost" onClick={() => void app.answerPermission(undefined, true)}>
+              <button className="ghost" onClick={() => void answerPermission(undefined, true)}>
                 Cancel
               </button>
             </div>
@@ -314,7 +473,25 @@ function ChatPane() {
         ) : null}
         <Composer />
       </div>
+      <PlanPanel />
     </main>
+  );
+}
+
+function WorkingLine() {
+  const working = useApp((s) => {
+    if (s.sending) return true;
+    const thread = s.threads.find((item) => item.sessionId === s.selectedSession);
+    if (!thread) return false;
+    if (!isReadOnlySession(s.selectedSession, s.threads, s.readOnlyIds)) return false;
+    return thread.watchStatus === "running";
+  });
+  if (!working) return null;
+  return (
+    <div className="working-line" aria-live="polite">
+      <span className="act-dot running" />
+      Working
+    </div>
   );
 }
 
@@ -330,7 +507,7 @@ function ThreadStatsBar() {
 
   useEffect(() => {
     if (!sessionId) return;
-    const handle = window.setInterval(() => void loadThreadStats(), sending ? 4000 : 20000);
+    const handle = window.setInterval(() => void loadThreadStats(), sending ? 4000 : 60_000);
     return () => window.clearInterval(handle);
   }, [sessionId, sending, loadThreadStats]);
 
@@ -378,13 +555,8 @@ function ThreadStatsBar() {
         <span className="thread-stat thread-stat-extra">{stats.toolCalls} tools</span>
       ) : null}
       {stats.userMessages != null ? (
-        <span className="thread-stat thread-stat-extra">{stats.userMessages} msgs</span>
+        <span className="thread-stat thread-stat-extra">{stats.userMessages} user msgs</span>
       ) : null}
     </div>
   );
-}
-
-function threadTitle(app: ReturnType<typeof useApp.getState>): string {
-  const thread = app.threads.find((t) => t.sessionId === app.selectedSession);
-  return thread?.title || "Thread";
 }

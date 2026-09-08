@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 
@@ -55,16 +56,19 @@ pub fn is_logged_in() -> bool {
     path.is_file() && std::fs::metadata(&path).map(|m| m.len() > 2).unwrap_or(false)
 }
 
+static GROK_VERSION: OnceLock<Option<String>> = OnceLock::new();
+
 pub fn grok_version(bin: &Path) -> Option<String> {
-    let output = std::process::Command::new(bin)
-        .arg("--version")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    Some(text.lines().next().unwrap_or(text.trim()).trim().to_string())
+    GROK_VERSION
+        .get_or_init(|| {
+            let output = std::process::Command::new(bin).arg("--version").output().ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let text = String::from_utf8_lossy(&output.stdout);
+            Some(text.lines().next().unwrap_or(text.trim()).trim().to_string())
+        })
+        .clone()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -274,6 +278,50 @@ fn b64_decode(input: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+pub fn open_session_in_terminal(session_id: &str, cwd: &str) -> Result<(), String> {
+    if session_id.is_empty()
+        || session_id.len() >= 128
+        || !session_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err("invalid session id".into());
+    }
+    crate::sessions::reject_live_headless(session_id, cwd)?;
+    let grok = find_grok().ok_or_else(|| "Grok Build CLI was not found".to_string())?;
+    let dir = PathBuf::from(cwd);
+    if !dir.is_dir() {
+        return Err("project folder not found".into());
+    }
+    let command = format!(
+        "cd {} && exec {} --resume {}",
+        sh_quote(&dir.display().to_string()),
+        sh_quote(&grok.display().to_string()),
+        sh_quote(session_id)
+    );
+    let script = format!(
+        "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
+        applescript_string(&command)
+    );
+    let status = StdCommand::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .status()
+        .map_err(|e| format!("failed to open Terminal: {e}"))?;
+    if !status.success() {
+        return Err("failed to open Terminal".into());
+    }
+    Ok(())
+}
+
+fn sh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn applescript_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 pub async fn start_login(bin: &Path) -> Result<(), String> {
     Command::new(bin)
         .arg("login")
@@ -287,7 +335,20 @@ pub async fn start_login(bin: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{b64_decode, b64_encode, image_mime};
+    use super::{applescript_string, b64_decode, b64_encode, image_mime, sh_quote};
+
+    #[test]
+    fn quotes_shell_and_applescript() {
+        assert_eq!(sh_quote("/tmp/proj"), "'/tmp/proj'");
+        assert_eq!(sh_quote("it's"), "'it'\\''s'");
+        assert_eq!(applescript_string(r#"cd "/tmp" && grok"#), r#"cd \"/tmp\" && grok"#);
+    }
+
+    #[test]
+    fn rejects_unsafe_session_ids_for_terminal() {
+        assert!(super::open_session_in_terminal("../etc", "/tmp").is_err());
+        assert!(super::open_session_in_terminal("a/b", "/tmp").is_err());
+    }
 
     #[test]
     fn roundtrips_base64() {
