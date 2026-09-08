@@ -34,7 +34,6 @@ export const api = {
   listProjects: () => invoke<ProjectInfo[]>("list_projects"),
   listSidebar: () =>
     invoke<{ threads: ThreadInfo[]; projects: ProjectInfo[] }>("list_sidebar"),
-  findThread: (sessionId: string) => invoke<ThreadInfo>("find_thread", { sessionId }),
   hydrateSession: (sessionId: string, cwd: string) =>
     invoke<Record<string, unknown>[]>("hydrate_session", { sessionId, cwd }),
   loadToolBody: (sessionId: string, cwd: string, toolCallId: string) =>
@@ -72,8 +71,8 @@ export const api = {
     invoke<Record<string, unknown>>("set_model", { sessionId, modelId }),
   setConfigOption: (sessionId: string, configId: string, value: string) =>
     invoke<Record<string, unknown>>("set_config_option", { sessionId, configId, value }),
-  respondPermission: (id: number, optionId?: string, cancelled = false) =>
-    invoke<void>("respond_permission", { id, optionId, cancelled }),
+  respondPermission: (sessionId: string, processId: number, id: number, optionId?: string, cancelled = false) =>
+    invoke<void>("respond_permission", { sessionId, processId, id, optionId, cancelled }),
   openInTerminal: (sessionId: string, cwd: string) =>
     invoke<void>("open_in_terminal", { sessionId, cwd }),
 };

@@ -1,16 +1,12 @@
-import { startTransition } from "react";
+import { useWorkspace, desktop, actualTheme, type TaskMetadata } from "./workspace";
+import { emptyRuntime, isRunning, nextQueued, acceptsEvent, addPermission, type TaskRuntime } from "./runtime";
 import { create } from "zustand";
 import { loadArchive, saveArchive, withArchived, withoutArchived } from "./archive";
 import { api } from "./api";
 import {
-  hasInProgressTools,
   isReadOnlySession,
-  isSafeSessionId,
-  isTurnEndUpdate,
-  isWorkUpdate,
   normalizeCwd,
   normalizeModeId,
-  parseSessionId,
   sameProject,
 } from "./format";
 import { EFFORT_CONFIG_ID, mergeModelState, modelsFrom } from "./models";
@@ -50,6 +46,12 @@ export const MODES = [
 ] as const;
 
 type AppState = {
+  tasks: Record<string, TaskRuntime>;
+  updateTask: (id: string, patch: Partial<TaskRuntime>) => void;
+  drainQueue: () => void;
+  runTask: (id: string) => Promise<void>;
+  retryTask: (id: string) => void;
+  clearQueue: (id: string) => void;
   status: GrokStatus | null;
   bootError: string | null;
   connected: boolean;
@@ -89,11 +91,12 @@ type AppState = {
   handleEvent: (event: AcpEvent) => void;
   selectProject: (cwd: string) => void;
   openThread: (thread: ThreadInfo, opts?: { readOnly?: boolean }) => Promise<void>;
-  openBySessionId: (sessionId: string, readOnly?: boolean) => Promise<void>;
+
   openInTerminal: (thread: ThreadInfo) => Promise<void>;
-  newThread: (cwd?: string) => Promise<void>;
+  newThread: (cwd?: string, options?: { environment?: "local" | "worktree"; base?: string; background?: boolean }) => Promise<string | undefined>;
   setComposer: (text: string) => void;
   send: () => Promise<void>;
+  compactHistory: (keep?: string) => Promise<void>;
   stop: () => Promise<void>;
   setMode: (modeId: string) => Promise<void>;
   setModel: (modelId: string) => Promise<void>;
@@ -103,7 +106,7 @@ type AppState = {
   setExplorerOpen: (open: boolean) => void;
   attachEntry: (item: Attachment) => void;
   setSlashOpen: (open: boolean) => void;
-  setTheme: (theme: "light" | "dark") => void;
+  setTheme: (theme: "light" | "dark" | "system") => void;
   addAttachment: (item: Attachment) => void;
   removeAttachment: (path: string) => void;
   loadSkills: (cwd?: string) => Promise<void>;
@@ -168,7 +171,7 @@ function pruneTranscripts(
   const drop = ids.length - TRANSCRIPT_LRU;
   let removed = 0;
   for (const id of ids) {
-    if (id === keepId) continue;
+    if (id === keepId || isRunning(useApp.getState().tasks[id])) continue;
     delete next[id];
     removed += 1;
     if (removed >= drop) break;
@@ -176,71 +179,31 @@ function pruneTranscripts(
   return next;
 }
 
-function flushStreamEvents(
-  events: AcpEvent[],
-  get: () => AppState,
-  set: (partial: Partial<AppState>) => void,
-) {
+function flushStreamEvents(events: AcpEvent[], get: () => AppState, set: (partial: Partial<AppState>) => void) {
   let transcripts = get().transcripts;
-  let changed = false;
-  let modelPatch: ReturnType<typeof applyModelRaw> | undefined;
-  let sawExitPlan = false;
-  let sawPlanUpdate = false;
-  let liveSelected = false;
-  let endSelected = false;
-  const ignoring = get().ignoringReplay;
-  const selected = get().selectedSession;
   for (const event of events) {
-    if (event.kind !== "update" || !event.sessionId) continue;
-    if (ignoring && event.sessionId === selected) continue;
+    const id = event.sessionId;
+    if (!id || !acceptsEvent(get().tasks[id], event.processId) || get().tasks[id].loading) continue;
     const update = event.payload as SessionUpdate;
-    const current = transcripts[event.sessionId] ?? emptyTranscript();
-    let next = applyUpdate(current, update);
-    if (update.sessionUpdate === "current_mode_update") {
-      const modeId = normalizeModeId(String(update.currentModeId ?? update.modeId ?? ""));
-      if (modeId) next.modeId = modeId;
-    }
-    if (update.sessionUpdate === "plan") sawPlanUpdate = true;
-    if (isExitPlanUpdate(update)) sawExitPlan = true;
-    if (event.sessionId === selected && isWorkUpdate(update.sessionUpdate) && get().sending) {
-      liveSelected = true;
-      if (next.status !== "needs-input" && next.status !== "error") {
-        next = { ...next, status: "running" };
-      }
-    }
-    if (event.sessionId === selected && isTurnEndUpdate(update.sessionUpdate)) {
-      endSelected = !hasInProgressTools(next.blocks);
-    }
+    const previous = transcripts[id] ?? emptyTranscript();
+    let next = applyUpdate(previous, update);
+    if (update.sessionUpdate === "current_mode_update") next = { ...next, modeId: normalizeModeId(update.currentModeId ?? update.modeId) };
+    transcripts = { ...transcripts, [id]: next };
     if (update.sessionUpdate === "config_option_update") {
-      modelPatch = applyModelRaw(event.payload, { ...get(), transcripts }, event.sessionId);
-      transcripts = {
-        ...modelPatch.transcripts,
-        [event.sessionId]: { ...next, effortId: modelPatch.currentEffort ?? next.effortId },
-      };
-      changed = true;
-      continue;
+      const model = mergeModelState(get().tasks[id], modelsFrom(event.payload));
+      get().updateTask(id, model);
     }
-    if (next !== current) {
-      transcripts = { ...transcripts, [event.sessionId]: next };
-      changed = true;
-    }
+    if (isExitPlanUpdate(update)) get().updateTask(id, { planReviewOpen: true, planPanelOpen: true });
+    if (id === get().selectedSession && (isExitPlanUpdate(update) || update.sessionUpdate === "plan")) void get().loadPlanDoc();
   }
-  if (!changed && !modelPatch && !sawExitPlan && !liveSelected && !endSelected) return;
-  const extra: Partial<AppState> = {};
-  if (sawExitPlan) {
-    extra.planReviewOpen = true;
-    extra.planPanelOpen = true;
-  }
-  if (liveSelected) extra.sending = true;
-  if (endSelected) extra.sending = false;
-  const apply = () => {
-    if (modelPatch) set({ ...modelPatch, transcripts, ...extra });
-    else set({ transcripts, ...extra });
-  };
-  if (liveSelected || endSelected || sawExitPlan) apply();
-  else startTransition(apply);
-  if (sawExitPlan || sawPlanUpdate) void get().loadPlanDoc();
+  set({ transcripts });
 }
+function projection(t: TaskRuntime) {
+  return { composer: t.draft, attachments: t.attachments, sending: isRunning(t), permission: t.permissions[0] ?? null,
+    models: t.models, currentModel: t.currentModel, efforts: t.efforts, currentEffort: t.currentEffort,
+    planDoc: t.planDoc, planPanelOpen: t.planPanelOpen, planReviewOpen: t.planReviewOpen };
+}
+const taskFields = { composer: 'draft', attachments: 'attachments', models: 'models', currentModel: 'currentModel', efforts: 'efforts', currentEffort: 'currentEffort', planDoc: 'planDoc', planPanelOpen: 'planPanelOpen', planReviewOpen: 'planReviewOpen' } as const;
 
 function applyModelRaw(
   raw: unknown,
@@ -264,7 +227,110 @@ function applyModelRaw(
   return { ...next, transcripts };
 }
 
-export const useApp = create<AppState>((set, get) => ({
+async function queuePrompt(
+  get: () => AppState,
+  text: string,
+  attachments: Attachment[],
+  clearDraft = true,
+) {
+  if (isReadOnlySession(get().selectedSession, get().threads, get().readOnlyIds)) return;
+  let sessionId = get().selectedSession;
+  if (!sessionId) {
+    const cwd = get().selectedCwd;
+    if (!cwd) return;
+    await get().newThread(cwd);
+    sessionId = get().selectedSession;
+  }
+  if (!sessionId) return;
+  const task = get().tasks[sessionId] ?? emptyRuntime();
+  get().updateTask(sessionId, {
+    queue: [...task.queue, { id: `prompt-${crypto.randomUUID()}`, text, attachments }],
+    status: isRunning(task) ? task.status : "queued",
+    ...(isRunning(task) ? {} : { loading: false, error: undefined }),
+    ...(clearDraft ? { draft: "", attachments: [] } : {}),
+  });
+  get().drainQueue();
+}
+
+export const useApp = create<AppState>((baseSet, get) => {
+  const set = (patch: Partial<AppState>) => {
+    const current = get();
+    const id = patch.selectedSession === undefined ? current.selectedSession : patch.selectedSession;
+    if (id) {
+      let task = { ...(patch.tasks ?? current.tasks)[id] ?? emptyRuntime() };
+      if (id !== current.selectedSession) {
+        const meta = useWorkspace.getState().data.tasks[id];
+        if (!current.tasks[id]) task = { ...task, draft: meta?.draft ?? '', attachments: meta?.attachments ?? [], currentModel: meta?.model, currentEffort: meta?.effort };
+        patch = { ...projection(task), ...patch };
+      }
+      for (const [alias, field] of Object.entries(taskFields)) {
+        if (Object.prototype.hasOwnProperty.call(patch, alias)) (task as unknown as Record<string, unknown>)[field] = (patch as Record<string, unknown>)[alias];
+      }
+      patch.tasks = { ...(patch.tasks ?? current.tasks), [id]: task };
+      if ('composer' in patch || 'attachments' in patch || 'currentModel' in patch || 'currentEffort' in patch) {
+        useWorkspace.getState().task(id, { draft: task.draft, attachments: task.attachments.map(({ preview: _preview, ...a }) => a), model: task.currentModel, effort: task.currentEffort });
+      }
+    }
+    baseSet(patch);
+    if ('selectedSession' in patch || 'selectedCwd' in patch) useWorkspace.getState().update({ selectedSession: get().selectedSession, selectedCwd: get().selectedCwd });
+  };
+  return ({
+  tasks: {},
+  updateTask: (id, patch) => {
+    const task = { ...(get().tasks[id] ?? emptyRuntime()), ...patch };
+    set({ tasks: { ...get().tasks, [id]: task }, ...(id === get().selectedSession ? projection(task) : {}) });
+  },
+  retryTask: id => { get().updateTask(id, { status: 'queued', error: undefined }); get().drainQueue(); },
+  clearQueue: id => { get().updateTask(id, { queue: [], ...(isRunning(get().tasks[id]) ? {} : { status: 'idle' }) }); },
+  drainQueue: () => { for (const id of nextQueued(get().tasks, useWorkspace.getState().data.settings.concurrency)) void get().runTask(id); },
+  runTask: async id => {
+    const runtime = get().tasks[id]; const prompt = runtime?.queue[0];
+    const cwd = get().selectedCwd;
+    const thread =
+      get().threads.find((item) => item.sessionId === id) ??
+      (cwd ? { sessionId: id, cwd, title: "New task" } : undefined);
+    if (!prompt || !thread || isRunning(runtime)) return;
+    get().updateTask(id, { status: 'running', loading: true, queue: runtime.queue.slice(1), error: undefined });
+    try {
+      const loaded = await api.loadSession(id, thread.cwd);
+      if (get().tasks[id]?.status === 'interrupted') { await desktop.closeTask(id); return; }
+      const model = mergeModelState(runtime, modelsFrom(loaded.raw));
+      get().updateTask(id, { ...model, processId: Number(loaded.raw.processId), loading: false });
+      const settings = useWorkspace.getState().data.settings;
+      const mode = get().transcripts[id]?.modeId ?? useWorkspace.getState().data.tasks[id]?.mode ?? settings.defaultMode;
+      if (mode) await api.setMode(id, mode).catch(() => {});
+      const chosenModel = runtime.currentModel || settings.defaultModel;
+      if (chosenModel) {
+        await api.setModel(id, chosenModel).catch(() => {});
+        get().updateTask(id, { currentModel: chosenModel });
+      }
+      if (runtime.currentEffort) {
+        await api.setConfigOption(id, EFFORT_CONFIG_ID, runtime.currentEffort).catch(() => {});
+      }
+      const current = get().transcripts[id] ?? emptyTranscript();
+      const display = [prompt.text, ...prompt.attachments.map(a => `@${a.rel}`)].filter(Boolean).join(' ');
+      set({ transcripts: { ...get().transcripts, [id]: { ...current, status: 'running', blocks: [...current.blocks, { type: 'user', id: prompt.id, text: display }] } } });
+      await api.sendPrompt(id, prompt.text || display, prompt.attachments);
+      cancelFrame(); flushStreamEvents(pendingEvents.splice(0), get, set);
+      if (get().tasks[id]?.status !== 'interrupted') {
+        get().updateTask(id, { status: 'completed', permissions: [] });
+        const transcript = get().transcripts[id];
+        if (transcript) set({ transcripts: { ...get().transcripts, [id]: { ...transcript, status: 'idle' } } });
+        window.dispatchEvent(new CustomEvent('task-notification', { detail: { id, title: 'Task completed', body: thread.title || 'Grok finished its work.' } }));
+      }
+    } catch (e) {
+      if (get().tasks[id]?.status !== 'interrupted') {
+        get().updateTask(id, { status: 'failed', error: String(e), permissions: [] });
+        window.dispatchEvent(new CustomEvent('task-notification', { detail: { id, title: 'Task failed', body: String(e) } }));
+      }
+    } finally {
+      get().updateTask(id, { loading: false, processId: undefined, permissions: [] });
+      await desktop.closeTask(id).catch(() => {});
+      void get().refreshLists().catch(() => {});
+      if (get().selectedSession === id) { void get().loadThreadStats(); void get().loadPlanDoc(); }
+      get().drainQueue();
+    }
+  },
   status: null,
   bootError: null,
   connected: false,
@@ -300,6 +366,11 @@ export const useApp = create<AppState>((set, get) => ({
   bootstrap: async () => {
     if (bootLock) return bootLock;
     bootLock = (async () => {
+      await useWorkspace.getState().load();
+      const workspace = useWorkspace.getState().data;
+      set({ theme: actualTheme(workspace.settings.theme), selectedCwd: workspace.selectedCwd,
+        archivedThreads: Object.entries(workspace.tasks).filter(([,t])=>t.archived).map(([id])=>id), archivedProjects: workspace.archivedProjects });
+      await desktop.configure(workspace.settings.grokPath);
       applyTheme(get().theme);
       const status = await api.grokStatus();
       set({ status, bootError: null });
@@ -326,6 +397,7 @@ export const useApp = create<AppState>((set, get) => ({
         const { selectedCwd, threads } = get();
         if (selectedCwd) {
           const match =
+            threads.find((t) => t.sessionId === workspace.selectedSession) ??
             threads.find((t) => t.cwd === selectedCwd && !t.headless) ??
             threads.find((t) => t.cwd === selectedCwd);
           if (match) void get().openThread(match);
@@ -345,7 +417,12 @@ export const useApp = create<AppState>((set, get) => ({
 
   refreshLists: async () => {
     const lists = await api.listSidebar();
-    set({ threads: lists.threads, projects: lists.projects });
+    const ws = useWorkspace.getState().data;
+    const threads: ThreadInfo[] = lists.threads.map(t => ({ ...t, title: ws.tasks[t.sessionId]?.title || t.title }));
+    for (const t of get().threads) if (!threads.some(row => row.sessionId === t.sessionId) && (get().tasks[t.sessionId] || ws.tasks[t.sessionId])) threads.push(t);
+    const projects = [...lists.projects];
+    for (const cwd of ws.projects) if (!projects.some(p => p.cwd === cwd)) projects.push({ cwd, name: cwd.split('/').pop() || cwd, threadCount: threads.filter(t => t.cwd === cwd).length });
+    set({ threads, projects });
   },
 
   login: async () => {
@@ -362,160 +439,64 @@ export const useApp = create<AppState>((set, get) => ({
     }
   },
 
-  handleEvent: (event) => {
-    if (isUrgentEvent(event)) {
-      cancelFrame();
-      const queued = pendingEvents.splice(0);
-      if (queued.length) flushStreamEvents(queued, get, set);
-    }
-    if (event.kind === "exit") {
-      if (get().starting) return;
-      set({ connected: false, bootError: "Grok agent disconnected. Reconnecting…" });
-      void get().bootstrap();
+  handleEvent: event => {
+    const id = event.sessionId;
+    if (!id) {
+      if (event.kind === 'exit' && !get().starting) set({ connected: false, bootError: 'Grok connection closed. Use Retry to reconnect.' });
       return;
     }
-    if (event.kind === "permission" && event.id != null) {
-      const payload = (event.payload ?? {}) as Record<string, unknown>;
-      const options = (payload.options ?? []) as PermissionRequest["options"];
-      const permission: PermissionRequest = {
-        id: event.id,
-        sessionId: event.sessionId ?? get().selectedSession ?? "",
-        title: typeof payload.title === "string" ? payload.title : undefined,
-        toolCall: (payload.toolCall ?? payload.tool_call) as Record<string, unknown> | undefined,
-        options,
-        raw: payload,
-      };
-      const planPerm = isPlanPermission(permission);
-      set({
-        permission,
-        ...(planPerm ? { planReviewOpen: true, planPanelOpen: true } : {}),
-      });
-      if (planPerm) void get().loadPlanDoc();
-      const sid = event.sessionId;
-      if (sid) {
-        const current = get().transcripts[sid] ?? emptyTranscript();
-        set({
-          transcripts: {
-            ...get().transcripts,
-            [sid]: { ...current, status: "needs-input" },
-          },
-        });
-      }
+    const task = get().tasks[id];
+    if (!acceptsEvent(task, event.processId)) return;
+    if (isUrgentEvent(event)) { cancelFrame(); flushStreamEvents(pendingEvents.splice(0), get, set); }
+    if (event.kind === 'exit') {
+      get().updateTask(id, { status: 'interrupted', processId: undefined, loading: false, permissions: [], error: 'Agent disconnected. History is preserved; the last prompt was not resent.' });
       return;
     }
-    if (event.kind === "notification") {
-      if (event.method?.includes("mcp")) {
-        set({ mcpNote: "MCP connected" });
-      }
-      if (event.method?.includes("models/update")) {
-        set(applyModelRaw(event.payload, get(), event.sessionId ?? get().selectedSession));
-      }
+    if (event.kind === 'permission' && event.id != null) {
+      const raw = (event.payload ?? {}) as Record<string, unknown>;
+      const permission: PermissionRequest = { id: event.id, processId: event.processId, sessionId: id, title: typeof raw.title === 'string' ? raw.title : undefined, toolCall: (raw.toolCall ?? raw.tool_call) as Record<string, unknown>, options: (raw.options ?? []) as PermissionRequest['options'], raw };
+      const next = addPermission(task, permission);
+      get().updateTask(id, { ...next, ...(isPlanPermission(permission) ? { planPanelOpen: true, planReviewOpen: true } : {}) });
+      if (id === get().selectedSession && isPlanPermission(permission)) void get().loadPlanDoc();
+      window.dispatchEvent(new CustomEvent('task-notification', { detail: { id, title: 'Approval required', body: permission.title || 'Grok needs your input.' } }));
       return;
     }
-    if (event.kind === "log") return;
-    if (event.kind === "batch") {
-      const raw = event.payload as { updates?: AcpEvent[] } | AcpEvent[] | undefined;
-      const updates = Array.isArray(raw) ? raw : (raw?.updates ?? []);
-      pendingEvents.push(...updates);
-    } else if (event.kind === "update" && event.sessionId) {
-      pendingEvents.push(event);
-    } else {
+    if (event.kind === 'notification') {
+      if (event.method?.includes('mcp')) set({ mcpNote: `MCP: ${event.method}` });
+      if (event.method?.includes('models/update')) get().updateTask(id, mergeModelState(task, modelsFrom(event.payload)));
       return;
     }
-    if (flushHandle) return;
-    scheduleFrame(() => {
-      flushHandle = 0;
-      const events = pendingEvents.splice(0);
-      if (events.length) flushStreamEvents(events, get, set);
-    });
+    if (event.kind === 'update') pendingEvents.push(event);
+    if (!flushHandle) scheduleFrame(() => { flushHandle = 0; flushStreamEvents(pendingEvents.splice(0), get, set); });
   },
 
   selectProject: (cwd) => {
     const normalized = cwd.replace(/\/+$/, "") || cwd;
     localStorage.setItem("gz.cwd", normalized);
+    const workspace = useWorkspace.getState();
+    const projects = workspace.data.projects.includes(normalized)
+      ? workspace.data.projects
+      : [...workspace.data.projects, normalized];
+    workspace.update({ selectedCwd: normalized, projects });
     set({ selectedCwd: normalized });
     void get().loadSkills(normalized);
   },
 
   openThread: async (thread, opts) => {
-    const cwd = thread.cwd.replace(/\/+$/, "") || thread.cwd;
-    const existing = get().transcripts[thread.sessionId];
+    const id = thread.sessionId;
     const readOnly = Boolean(opts?.readOnly || thread.headless);
     const gen = ++threadLoadGen;
-    const readOnlyIds = readOnly
-      ? withArchived(get().readOnlyIds, thread.sessionId)
-      : withoutArchived(get().readOnlyIds, thread.sessionId);
-    set({
-      selectedCwd: cwd,
-      selectedSession: thread.sessionId,
-      threadStats: null,
-      sending: false,
-      ignoringReplay: true,
-      permission: null,
-      planReviewOpen: false,
-      readOnlyIds,
-      currentEffort: existing?.effortId ?? get().currentEffort,
-      transcripts: pruneTranscripts(get().transcripts, thread.sessionId),
-    });
-    localStorage.setItem("gz.cwd", cwd);
-    void get().loadSkills(cwd);
-    void get().loadThreadStats();
+    const existing = get().transcripts[id];
+    set({ selectedCwd: thread.cwd, selectedSession: id, threadStats: null, readOnlyIds: readOnly ? withArchived(get().readOnlyIds, id) : withoutArchived(get().readOnlyIds, id), transcripts: pruneTranscripts(get().transcripts, id) });
+    void get().loadSkills(thread.cwd); void get().loadThreadStats();
+    if (existing && !readOnly) { void get().loadPlanDoc(); return; }
     try {
-      const updates = (await api.hydrateSession(thread.sessionId, thread.cwd)) as SessionUpdate[];
-      if (gen !== threadLoadGen) return;
-      const watch = readOnly
-        ? thread.watchStatus === "running"
-          ? "running"
-          : thread.watchStatus === "error"
-            ? "error"
-            : "idle"
-        : "idle";
-      set({
-        transcripts: {
-          ...get().transcripts,
-          [thread.sessionId]: reuseTranscriptBlocks(
-            existing,
-            withStableBlockIds({ ...applyUpdates(updates), status: watch }),
-          ),
-        },
-      });
-      void get().loadPlanDoc();
-      if (readOnly) {
-        set({ ignoringReplay: false });
-        void get().refreshHeadlessWatch();
-        return;
-      }
-      const loaded = await api.loadSession(thread.sessionId, thread.cwd);
-      if (gen !== threadLoadGen) return;
-      set({
-        ignoringReplay: false,
-        ...applyModelRaw(loaded.raw, get(), thread.sessionId),
-      });
-      void get().loadThreadStats();
-      void get().loadPlanDoc();
-    } catch (err) {
-      if (gen !== threadLoadGen) return;
-      set({
-        ignoringReplay: false,
-        bootError: err instanceof Error ? err.message : String(err),
-      });
-    }
-  },
-
-  openBySessionId: async (raw, readOnly = true) => {
-    const sessionId = parseSessionId(raw);
-    if (!sessionId) throw new Error("Enter a session id");
-    if (!isSafeSessionId(sessionId)) throw new Error("That is not a valid session id");
-    let thread = get().threads.find((item) => item.sessionId === sessionId);
-    if (!thread) {
-      const found = await api.findThread(sessionId);
-      set({
-        threads: [found, ...get().threads.filter((item) => item.sessionId !== found.sessionId)],
-      });
-      thread = found;
-    }
-    if (get().archivedThreads.includes(thread.sessionId)) get().unarchiveThread(thread.sessionId);
-    await get().openThread(thread, { readOnly });
+      const updates = await api.hydrateSession(id, thread.cwd) as SessionUpdate[];
+      if (isRunning(get().tasks[id])) return;
+      const watch = readOnly && thread.watchStatus === 'running' ? 'running' : readOnly && thread.watchStatus === 'error' ? 'error' : 'idle';
+      set({ transcripts: { ...get().transcripts, [id]: reuseTranscriptBlocks(existing, withStableBlockIds({ ...applyUpdates(updates), status: watch })) } });
+      if (gen === threadLoadGen) void get().loadPlanDoc();
+    } catch(e) { if (gen === threadLoadGen) set({ bootError: String(e) }); }
   },
 
   openInTerminal: async (thread) => {
@@ -526,32 +507,37 @@ export const useApp = create<AppState>((set, get) => ({
     }
   },
 
-  newThread: async (cwd) => {
-    const target = (cwd ?? get().selectedCwd)?.replace(/\/+$/, "") || cwd || get().selectedCwd;
-    if (!target) return;
-    const created = await api.newSession(target);
-    const transcripts = {
-      ...get().transcripts,
-      [created.sessionId]: emptyTranscript(),
-    };
-    set({
-      selectedCwd: target,
-      selectedSession: created.sessionId,
-      composer: "",
-      attachments: [],
-      threadStats: null,
-      planDoc: null,
-      planPanelOpen: false,
-      planReviewOpen: false,
-      ...applyModelRaw(created.raw, { ...get(), transcripts }, created.sessionId),
-    });
-    localStorage.setItem("gz.cwd", target);
-    void get().loadSkills(target);
-    await get().refreshLists();
-    void get().loadThreadStats();
+  newThread: async (cwd, options) => {
+    const target = cwd || get().selectedCwd;
+    if (!target) { useWorkspace.getState().openNewTask(); return; }
+    try {
+      let meta: TaskMetadata = { cwd: target, repository: target, environment: 'local' };
+      if (options?.environment !== 'local') {
+        const info = await desktop.gitInfo(target).catch(() => null);
+        if (info) meta = await desktop.createWorktree(info.root, options?.base || 'HEAD');
+      }
+      const actualCwd = meta.cwd || target;
+      const created = await api.newSession(actualCwd);
+      const id = created.sessionId;
+      const settings = useWorkspace.getState().data.settings;
+      const workspace = useWorkspace.getState();
+      const projects = workspace.data.projects.includes(target)
+        ? workspace.data.projects
+        : [...workspace.data.projects, target];
+      workspace.update({ projects });
+      workspace.task(id, { ...meta, mode: settings.defaultMode });
+      const model = mergeModelState(emptyRuntime(), modelsFrom(created.raw));
+      const task = { ...emptyRuntime(), ...model, currentModel: settings.defaultModel || model.currentModel };
+      set({ tasks: { ...get().tasks, [id]: task }, transcripts: { ...get().transcripts, [id]: { ...emptyTranscript(), modeId: settings.defaultMode } },
+        threads: [{ sessionId: id, cwd: actualCwd, title: 'New task', createdAt: new Date().toISOString() }, ...get().threads],
+        ...(options?.background ? {} : { selectedCwd: actualCwd, selectedSession: id, ...projection(task), threadStats: null }) });
+      if (!options?.background) void get().loadSkills(actualCwd);
+      await get().refreshLists();
+      return id;
+    } catch(e) { set({ bootError: String(e) }); throw e; }
   },
 
-  setComposer: (text) => set({ composer: text, slashOpen: text.startsWith("/") }),
+  setComposer: (text) => set({ composer: text }),
 
   addAttachment: (item) => {
     const exists = get().attachments.some((a) => a.path === item.path);
@@ -626,220 +612,62 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   send: async () => {
-    const { composer, selectedSession, selectedCwd, sending } = get();
-    let text = composer.trim();
-    let attachments = get().attachments;
-    const first = text.split(/\s+/)[0] ?? "";
-    if (first === "/resume" || first === "/view") {
-      const rest = text.slice(first.length).trim();
-      set({ composer: "", slashOpen: false });
-      try {
-        await get().openBySessionId(rest, first === "/view");
-      } catch (err) {
-        set({ bootError: err instanceof Error ? err.message : String(err) });
-      }
-      return;
-    }
+    const { composer, selectedSession } = get();
+    const text = composer.trim();
+    const attachments = get().attachments;
     if (isReadOnlySession(selectedSession, get().threads, get().readOnlyIds)) return;
-    if ((!text && attachments.length === 0) || sending) return;
-    if (first === "/new" || first === "/clear") {
-      set({ composer: "", slashOpen: false, attachments: [] });
-      await get().newThread();
-      return;
-    }
-    if (first === "/always-approve" || first === "/yolo") {
-      set({ composer: "", slashOpen: false });
-      await get().setMode("yolo");
-      return;
-    }
-    if (first === "/view-plan" || first === "/show-plan" || first === "/plan-view") {
-      set({ composer: "", slashOpen: false });
-      get().openPlanPanel();
-      return;
-    }
-    if (first === "/plan") {
-      const rest = text.replace(/^\/plan\s*/i, "").trim();
-      set({ composer: "", slashOpen: false });
-      await get().setMode("plan");
-      if (!rest) return;
-      text = rest;
-      attachments = [];
-    }
-    if (first === "/effort") {
-      const level = text.split(/\s+/)[1];
-      if (level) {
-        set({ composer: "", slashOpen: false });
-        await get().setEffort(level);
-        return;
-      }
-    }
-    let sessionId = selectedSession;
-    if (!sessionId) {
-      if (!selectedCwd) return;
-      await get().newThread(selectedCwd);
-      sessionId = get().selectedSession;
-    }
-    if (!sessionId) return;
-    const display = [text, ...attachments.map((a) => `@${a.rel}`)].filter(Boolean).join(" ");
-    const current = get().transcripts[sessionId] ?? emptyTranscript();
-    set({
-      composer: "",
-      slashOpen: false,
-      attachments: [],
-      sending: true,
-      transcripts: {
-        ...get().transcripts,
-        [sessionId]: {
-          ...current,
-          status: "running",
-          blocks: current.blocks.some(
-            (b) => b.type === "user" && b.text === display && current.blocks[current.blocks.length - 1] === b,
-          )
-            ? current.blocks
-            : [...current.blocks, { type: "user", id: `local-${Date.now()}`, text: display }],
-        },
-      },
-    });
+    if (!text && attachments.length === 0) return;
     try {
-      await api.sendPrompt(sessionId, text || display, attachments);
-      const after = get().transcripts[sessionId] ?? emptyTranscript();
-      const live = hasInProgressTools(after.blocks);
-      set({
-        sending: live,
-        transcripts: {
-          ...get().transcripts,
-          [sessionId]: {
-            ...after,
-            status:
-              after.status === "needs-input" ? "needs-input" : live ? "running" : "idle",
-          },
-        },
-      });
-      await get().refreshLists();
-      void get().loadUsage();
-      void get().loadThreadStats();
+      await queuePrompt(get, text, attachments);
     } catch (err) {
-      const after = get().transcripts[sessionId] ?? emptyTranscript();
-      set({
-        sending: false,
-        bootError: err instanceof Error ? err.message : String(err),
-        transcripts: {
-          ...get().transcripts,
-          [sessionId]: { ...after, status: "error" },
-        },
-      });
+      set({ bootError: err instanceof Error ? err.message : String(err) });
     }
+  },
+
+  compactHistory: async (keep) => {
+    const notes = keep?.trim();
+    await queuePrompt(get, notes ? `/compact ${notes}` : "/compact", [], false);
   },
 
   stop: async () => {
-    const sessionId = get().selectedSession;
-    if (!sessionId) {
-      set({ sending: false });
-      return;
-    }
-    try {
-      await api.cancelPrompt(sessionId);
-    } catch {
-      /* no in-flight prompt — still clear the working state */
-    }
-    if (get().permission) {
-      try {
-        await api.respondPermission(get().permission!.id, undefined, true);
-      } catch {
-        /* ignore */
-      }
-      set({ permission: null });
-    }
-    const current = get().transcripts[sessionId];
-    set({
-      sending: false,
-      transcripts: current
-        ? {
-            ...get().transcripts,
-            [sessionId]: {
-              ...current,
-              status: current.status === "needs-input" ? "idle" : current.status === "running" ? "idle" : current.status,
-            },
-          }
-        : get().transcripts,
-    });
+    const id = get().selectedSession; if (!id) return;
+    get().updateTask(id, { status: 'interrupted', queue: [], permissions: [], error: 'Stopped by you.' });
+    await api.cancelPrompt(id).catch(() => {});
+    await desktop.closeTask(id).catch(() => {});
+    get().updateTask(id, { processId: undefined, loading: false });
+    const transcript = get().transcripts[id];
+    if (transcript) set({ transcripts: { ...get().transcripts, [id]: { ...transcript, status: 'idle', blocks: transcript.blocks.map(b => b.type === 'tool' && /running|in_progress|pending/.test(b.status) ? { ...b, status: 'cancelled' } : b) } } });
+    get().drainQueue();
   },
 
-  setMode: async (modeId) => {
-    const sessionId = get().selectedSession;
-    if (!sessionId) return;
-    if (isReadOnlySession(sessionId, get().threads, get().readOnlyIds)) return;
-    const normalized = normalizeModeId(modeId) ?? modeId;
-    const current = get().transcripts[sessionId] ?? emptyTranscript();
-    if (current.modeId === normalized) return;
-    set({
-      transcripts: {
-        ...get().transcripts,
-        [sessionId]: { ...current, modeId: normalized },
-      },
-    });
-    try {
-      await api.setMode(sessionId, normalized);
-    } catch {
-      await api.sendPrompt(sessionId, `/${normalized === "yolo" ? "always-approve" : normalized}`);
-    }
+  setMode: async mode => {
+    const id = get().selectedSession; if (!id || isReadOnlySession(id, get().threads, get().readOnlyIds)) return;
+    const modeId = normalizeModeId(mode) ?? mode;
+    if (isRunning(get().tasks[id])) await api.setMode(id, modeId).catch(() => {});
+    const current = get().transcripts[id] ?? emptyTranscript();
+    set({ transcripts: { ...get().transcripts, [id]: { ...current, modeId } } });
+    useWorkspace.getState().task(id, { mode: modeId });
   },
-
-  setModel: async (modelId) => {
-    const sessionId = get().selectedSession;
-    if (sessionId && isReadOnlySession(sessionId, get().threads, get().readOnlyIds)) return;
-    const model = get().models.find((item) => item.modelId === modelId);
+  setModel: async modelId => {
+    const id = get().selectedSession; if (!id || isReadOnlySession(id, get().threads, get().readOnlyIds)) return;
+    if (isRunning(get().tasks[id])) await api.setModel(id, modelId).catch(() => {});
+    const model = get().models.find(m => m.modelId === modelId);
     const efforts = model?.reasoningEfforts ?? [];
-    const supports = Boolean(model?.supportsReasoningEffort && efforts.length);
-    let currentEffort = get().currentEffort;
-    if (!supports) currentEffort = undefined;
-    else if (!currentEffort || !efforts.some((effort) => effort.id === currentEffort)) {
-      currentEffort = model?.reasoningEffort ?? efforts[0]?.id;
-    }
-    const transcripts = { ...get().transcripts };
-    if (sessionId) {
-      const current = transcripts[sessionId] ?? emptyTranscript();
-      transcripts[sessionId] = { ...current, effortId: currentEffort };
-    }
-    set({
-      currentModel: modelId,
-      efforts: supports ? efforts : [],
-      currentEffort,
-      transcripts,
-    });
-    if (!sessionId) return;
-    try {
-      await api.setModel(sessionId, modelId);
-    } catch {
-      /* model switch is best-effort */
-    }
+    get().updateTask(id, { currentModel: modelId, efforts, currentEffort: model?.reasoningEffort ?? efforts[0]?.id });
   },
-
-  setEffort: async (effortId) => {
-    const sessionId = get().selectedSession;
-    const transcripts = { ...get().transcripts };
-    if (sessionId) {
-      const current = transcripts[sessionId] ?? emptyTranscript();
-      transcripts[sessionId] = { ...current, effortId };
-    }
-    set({ currentEffort: effortId, transcripts });
-    if (!sessionId) return;
-    try {
-      await api.setConfigOption(sessionId, EFFORT_CONFIG_ID, effortId);
-    } catch {
-      try {
-        await api.sendPrompt(sessionId, `/effort ${effortId}`);
-      } catch {
-        /* effort switch is best-effort */
-      }
-    }
+  setEffort: async effortId => {
+    const id = get().selectedSession; if (!id || isReadOnlySession(id, get().threads, get().readOnlyIds)) return;
+    if (isRunning(get().tasks[id])) await api.setConfigOption(id, EFFORT_CONFIG_ID, effortId).catch(() => {});
+    get().updateTask(id, { currentEffort: effortId });
   },
-
   answerPermission: async (optionId, cancelled = false) => {
-    const permission = get().permission;
-    if (!permission) return;
-    await api.respondPermission(permission.id, optionId, cancelled);
-    set({ permission: null, planReviewOpen: false });
+    const permission = get().permission; if (!permission || permission.processId == null) return;
+    const id = permission.sessionId;
+    await api.respondPermission(id, permission.processId, permission.id, optionId, cancelled);
+    const task = get().tasks[id];
+    if (!task || task.processId !== permission.processId) return;
+    const permissions = task.permissions.filter(p => p.id !== permission.id || p.processId !== permission.processId);
+    get().updateTask(id, { permissions, status: permissions.length ? 'needs-input' : 'running', planReviewOpen: false });
   },
 
   toggle: (id) => {
@@ -984,6 +812,7 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   archiveThread: (sessionId) => {
+    useWorkspace.getState().task(sessionId, { archived: true });
     const { archivedThreads, archivedProjects, threads, selectedSession } = get();
     if (archivedThreads.includes(sessionId)) return;
     const nextThreads = withArchived(archivedThreads, sessionId);
@@ -1007,6 +836,7 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   unarchiveThread: (sessionId) => {
+    useWorkspace.getState().task(sessionId, { archived: false });
     const { archivedThreads, archivedProjects, threads } = get();
     const thread = threads.find((item) => item.sessionId === sessionId);
     const nextThreads = withoutArchived(archivedThreads, sessionId);
@@ -1018,6 +848,8 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   deleteThread: async (sessionId) => {
+    if (isRunning(get().tasks[sessionId])) throw new Error("Stop this task before deleting it");
+    await desktop.closeTask(sessionId);
     const { threads, archivedThreads, archivedProjects, selectedSession, transcripts } = get();
     const thread = threads.find((item) => item.sessionId === sessionId);
     if (!thread) return;
@@ -1049,6 +881,7 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   archiveProject: (cwd) => {
+    useWorkspace.getState().update({ archivedProjects: withArchived(useWorkspace.getState().data.archivedProjects, cwd) });
     const key = normalizeCwd(cwd);
     const { archivedThreads, archivedProjects, selectedCwd, selectedSession, threads } = get();
     if (archivedProjects.includes(key)) return;
@@ -1069,6 +902,7 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   unarchiveProject: (cwd) => {
+    useWorkspace.getState().update({ archivedProjects: withoutArchived(useWorkspace.getState().data.archivedProjects, cwd) });
     const key = normalizeCwd(cwd);
     const { archivedThreads, archivedProjects } = get();
     const nextProjects = withoutArchived(archivedProjects, key);
@@ -1079,7 +913,10 @@ export const useApp = create<AppState>((set, get) => ({
   setExplorerOpen: (open) => set({ explorerOpen: open }),
   setSlashOpen: (open) => set({ slashOpen: open }),
   setTheme: (theme) => {
-    applyTheme(theme);
-    set({ theme });
+    useWorkspace.getState().settings({ theme });
+    const resolved = actualTheme(theme);
+    applyTheme(resolved);
+    set({ theme: resolved });
   },
-}));
+});
+});

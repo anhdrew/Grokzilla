@@ -207,22 +207,6 @@ export function isTranscriptLive(
   return hasInProgressTools(transcript.blocks);
 }
 
-const SESSION_UUID =
-  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-
-export function parseSessionId(raw: string): string {
-  const trimmed = raw.trim().replace(/^['"]+|['"]+$/g, "");
-  if (!trimmed) return "";
-  const uuid = trimmed.match(SESSION_UUID);
-  if (uuid) return uuid[0].toLowerCase();
-  const last = trimmed.split(/[\\/\s]/).filter(Boolean).pop() ?? trimmed;
-  return last.trim();
-}
-
-export function isSafeSessionId(id: string): boolean {
-  return id.length > 0 && id.length < 128 && /^[A-Za-z0-9_-]+$/.test(id);
-}
-
 export function isReadOnlySession(
   sessionId: string | null | undefined,
   threads: Array<{ sessionId: string; headless?: boolean }>,
@@ -238,9 +222,13 @@ export function workStatus(
   transcripts: Record<string, { status?: string; blocks?: Array<{ type: string; status?: string }> } | undefined>,
   sending = false,
   selectedSession: string | null = null,
+  runtimes?: Record<string, { status?: string }>,
 ): WorkStatus | null {
   let waiting = false;
   for (const id of sessionIds) {
+    const runtime = runtimes?.[id]?.status;
+    if (runtime === "running" || runtime === "queued") return "running";
+    if (runtime === "needs-input") waiting = true;
     const transcript = transcripts[id];
     if (isTranscriptLive(transcript, sending, selectedSession === id)) return "running";
     if (transcript?.status === "needs-input") waiting = true;

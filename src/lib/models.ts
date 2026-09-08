@@ -19,7 +19,7 @@ const EFFORT_LABELS: Record<string, string> = {
   max: "Max",
 };
 
-export const EFFORT_CONFIG_ID = "mode";
+export const EFFORT_CONFIG_ID = "reasoning_effort";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)

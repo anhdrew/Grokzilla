@@ -16,6 +16,14 @@ describe("activeToken", () => {
     expect(activeToken("/comp", 5)).toMatchObject({ kind: "slash", query: "comp" });
   });
 
+  it("detects slash after other words", () => {
+    expect(activeToken("please /comp", 12)).toMatchObject({
+      kind: "slash",
+      query: "comp",
+      start: 7,
+    });
+  });
+
   it("ignores slash inside a path", () => {
     expect(activeToken("src/app", 7)).toBeNull();
   });

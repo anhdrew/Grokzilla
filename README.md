@@ -13,8 +13,8 @@ The build is ad-hoc signed (no Apple Developer ID). First launch: right-click **
 To cut a new GitHub Release, bump `version` in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, then:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 GitHub Actions builds both Mac chips and uploads the `.dmg` files to the release.
@@ -45,9 +45,7 @@ pnpm tauri dev
 2. Start a thread or resume one from `~/.grok/sessions` (shared with the TUI).
 3. Ask Grok to work. In **Ask** mode, tool calls wait for a click.
 
-Shortcuts: `Cmd+N` new thread, `Cmd+J` review pane, `Enter` send, `Esc` stop. Hover a thread and click the terminal icon to resume it in Terminal (`grok --resume`). Plan mode (`/plan`) opens a review sheet for `plan.md` — approve, request changes, or quit. `/view-plan` reopens it.
-
-Paste a session id in the sidebar to open it. **Read-only** hydrates the transcript from disk and never attaches (safe while the TUI or `grok -p` is using that session). **Open** resumes and attaches. `/view <id>` and `/resume <id>` do the same from the composer.
+Shortcuts: `Cmd+N` new thread, `Cmd+J` review pane, `Enter` send, `Esc` stop. Hover a thread and click the terminal icon to resume it in Terminal (`grok --resume`). Use **New**, **Plan**, and **Compact** in the chat header for those actions. Slash in the composer is for skills.
 
 Headless `grok -p` sessions show in the sidebar with a `-p` badge. Grokzilla watches status and results from disk (read-only) and never attaches, so it cannot interrupt a running one-shot prompt.
 

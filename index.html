@@ -7,12 +7,14 @@
     <title>Grokzilla</title>
     <script>
       document.documentElement.dataset.theme =
-        localStorage.getItem("gz.theme") === "dark" ? "dark" : "light";
+        localStorage.getItem("gz.theme") === "dark" || localStorage.getItem("gz.theme") === "light"
+          ? localStorage.getItem("gz.theme")
+          : matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
     </script>
   </head>
 
   <body>
-    <div id="root"></div>
+    <div id="root">Starting Grokzilla…</div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

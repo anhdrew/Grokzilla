@@ -1,3 +1,4 @@
+import { useWorkspace } from "../lib/workspace";
 import { memo, useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { setExplorerDrag } from "../lib/explorer-drag";
@@ -6,7 +7,7 @@ import { useApp } from "../lib/store";
 import type { PathHit } from "../lib/types";
 import { IconFile, IconFolder, IconSearch } from "./icons";
 
-export const Explorer = memo(function Explorer() {
+export const Explorer = memo(function Explorer({ embedded = false }: { embedded?: boolean }) {
   const cwd = useApp((s) => s.selectedCwd);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<PathHit[]>([]);
@@ -31,7 +32,7 @@ export const Explorer = memo(function Explorer() {
 
   if (!cwd) {
     return (
-      <aside className="explorer">
+      <aside className={`explorer ${embedded ? "embedded" : ""}`}>
         <div className="explorer-head">
           <span className="kicker">Explorer</span>
         </div>
@@ -43,7 +44,7 @@ export const Explorer = memo(function Explorer() {
   }
 
   return (
-    <aside className="explorer">
+    <aside className={`explorer ${embedded ? "embedded" : ""}`}>
       <div className="explorer-head">
         <span className="kicker">Explorer</span>
         <span className="tree-count" title={cwd}>
@@ -146,9 +147,13 @@ function ExplorerRow({
       onDragStart={(event) => {
         setExplorerDrag(event.dataTransfer, entry);
       }}
+      onClick={() => {
+        if (!folder) useWorkspace.getState().openFile(entry.rel || entry.path);
+      }}
       onDoubleClick={(event) => {
         event.preventDefault();
-        attach();
+        if (folder) attach();
+        else useWorkspace.getState().openFile(entry.rel || entry.path);
       }}
     >
       {folder ? (

@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from "react";
 import { api } from "../lib/api";
 import { getExplorerDrag } from "../lib/explorer-drag";
-import { APP_COMMANDS, activeToken, replaceToken } from "../lib/tokens";
+import { APP_COMMAND_NAMES, activeToken, replaceToken } from "../lib/tokens";
 import { isReadOnlySession, normalizeModeId } from "../lib/format";
 import { MODES, useApp } from "../lib/store";
 import type { PathHit, SlashCommand } from "../lib/types";
@@ -64,15 +64,15 @@ export const Composer = memo(function Composer() {
   const token = activeToken(composer, cursor);
 
   const commands = useMemo(() => {
-    const merged: SlashCommand[] = [...APP_COMMANDS];
-    const seen = new Set(merged.map((c) => c.name));
+    const merged: SlashCommand[] = [];
+    const seen = new Set<string>();
     for (const command of sessionCommands) {
-      if (seen.has(command.name)) continue;
+      if (APP_COMMAND_NAMES.has(command.name) || seen.has(command.name)) continue;
       seen.add(command.name);
       merged.push({ ...command, source: command.source ?? "session" });
     }
     for (const skill of skills) {
-      if (seen.has(skill.name)) continue;
+      if (APP_COMMAND_NAMES.has(skill.name) || seen.has(skill.name)) continue;
       seen.add(skill.name);
       merged.push({
         name: skill.name,
@@ -137,21 +137,17 @@ export const Composer = memo(function Composer() {
 
   function acceptSlash(command: SlashCommand) {
     if (!token || token.kind !== "slash") return;
-    const insert = command.hint ? `/${command.name} ` : `/${command.name}`;
+    const insert = `/${command.name} `;
     const next = replaceToken(composer, token, insert);
+    const pos = token.start + insert.length;
     setComposer(next);
-    if (!command.hint) {
-      void useApp.getState().send();
-    } else {
-      requestAnimationFrame(() => {
-        const el = area.current;
-        if (!el) return;
-        const pos = next.length;
-        el.focus();
-        el.setSelectionRange(pos, pos);
-        setCursor(pos);
-      });
-    }
+    requestAnimationFrame(() => {
+      const el = area.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(pos, pos);
+      setCursor(pos);
+    });
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -334,7 +330,7 @@ export const Composer = memo(function Composer() {
           headless
             ? "Read-only — this grok -p session is watch-only"
             : readOnly
-              ? "Read-only — paste another session id in the sidebar to switch"
+              ? "Read-only — this transcript is watch-only"
               : "Message Grokzilla…  @ files  / skills  drop images"
         }
         disabled={readOnly}

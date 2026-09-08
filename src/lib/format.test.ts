@@ -4,10 +4,8 @@ import {
   extractText,
   formatReset,
   isReadOnlySession,
-  isSafeSessionId,
   modeLabel,
   normalizeModeId,
-  parseSessionId,
   planEntries,
   shortPath,
   toolDetail,
@@ -109,39 +107,18 @@ describe("workStatus", () => {
     expect(workStatus(["a"], { a: { status: "error" } })).toBeNull();
     expect(workStatus(["a"], { a: { status: "needs-input" } })).toBe("needs-input");
   });
-});
 
-describe("parseSessionId", () => {
-  it("extracts a UUID from pasted text or a path", () => {
-    expect(parseSessionId("  01a07ece-f6f9-7d61-930f-cc789f20cae6  ")).toBe(
-      "01a07ece-f6f9-7d61-930f-cc789f20cae6",
-    );
-    expect(parseSessionId("01A07ECE-F6F9-7D61-930F-CC789F20CAE6")).toBe(
-      "01a07ece-f6f9-7d61-930f-cc789f20cae6",
+  it("uses per-task runtime status when transcripts are stale", () => {
+    expect(workStatus(["a"], { a: { status: "idle" } }, false, null, { a: { status: "queued" } })).toBe(
+      "running",
     );
     expect(
-      parseSessionId("resume 01a07ece-f6f9-7d61-930f-cc789f20cae6 now"),
-    ).toBe("01a07ece-f6f9-7d61-930f-cc789f20cae6");
-    expect(
-      parseSessionId("/Users/anh/.grok/sessions/proj/01a07ece-f6f9-7d61-930f-cc789f20cae6"),
-    ).toBe("01a07ece-f6f9-7d61-930f-cc789f20cae6");
-  });
-
-  it("keeps custom ids from a path", () => {
-    expect(parseSessionId("sess-custom_1")).toBe("sess-custom_1");
-    expect(parseSessionId("~/.grok/sessions/proj/sess-custom_1")).toBe("sess-custom_1");
-    expect(parseSessionId("")).toBe("");
+      workStatus(["a"], { a: { status: "idle" } }, false, null, { a: { status: "needs-input" } }),
+    ).toBe("needs-input");
   });
 });
 
-describe("isSafeSessionId / isReadOnlySession", () => {
-  it("rejects path-like ids", () => {
-    expect(isSafeSessionId("01a07ece-f6f9-7d61-930f-cc789f20cae6")).toBe(true);
-    expect(isSafeSessionId("../etc")).toBe(false);
-    expect(isSafeSessionId("a/b")).toBe(false);
-    expect(isSafeSessionId("")).toBe(false);
-  });
-
+describe("isReadOnlySession", () => {
   it("treats headless and explicit ids as read-only", () => {
     const threads = [
       { sessionId: "live" },

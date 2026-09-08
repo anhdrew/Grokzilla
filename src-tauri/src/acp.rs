@@ -31,6 +31,9 @@ struct AcpInner {
     next_id: AtomicU64,
     shutting_down: AtomicBool,
     app: AppHandle,
+    session: std::sync::Mutex<Option<String>>,
+    generation: u64,
+    permissions: Mutex<HashMap<u64, Vec<String>>>,
 }
 
 pub struct AcpClient {
@@ -39,7 +42,11 @@ pub struct AcpClient {
     init: Mutex<Option<Value>>,
 }
 
+static GENERATION: AtomicU64 = AtomicU64::new(1);
+
 impl AcpClient {
+    pub fn bind(&self, session: &str) { *self.inner.session.lock().unwrap() = Some(session.to_string()); }
+    pub fn generation(&self) -> u64 { self.inner.generation }
     pub async fn spawn(app: AppHandle, grok: PathBuf) -> Result<Self, String> {
         let mut cmd = Command::new(&grok);
         cmd.arg("agent")
@@ -83,6 +90,9 @@ impl AcpClient {
             next_id: AtomicU64::new(1),
             shutting_down: AtomicBool::new(false),
             app: app.clone(),
+            session: std::sync::Mutex::new(None),
+            generation: GENERATION.fetch_add(1, Ordering::SeqCst),
+            permissions: Mutex::new(HashMap::new()),
         });
 
         let reader_inner = inner.clone();
@@ -132,6 +142,7 @@ impl AcpClient {
             if let Some(prev) = pending.take() {
                 emit_event(&reader_inner, prev);
             }
+            reader_inner.pending.lock().await.clear();
             if reader_inner.shutting_down.load(Ordering::SeqCst) {
                 return;
             }
@@ -151,7 +162,7 @@ impl AcpClient {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             let verbose = std::env::var_os("GROKZILLA_ACP_LOG").is_some();
-            while let Ok(Some(line)) = lines.next_line().await {
+            while let Ok(Some(_line)) = lines.next_line().await {
                 if !verbose {
                     continue;
                 }
@@ -163,7 +174,7 @@ impl AcpClient {
                         session_id: None,
                         method: None,
                         id: None,
-                        payload: json!({ "stream": "stderr", "line": line }),
+                        payload: json!({ "stream": "stderr", "line": "[redacted]" }),
                     },
                 );
             }
@@ -204,7 +215,7 @@ impl AcpClient {
                 "clientInfo": {
                     "name": "grokzilla",
                     "title": "Grokzilla",
-                    "version": "0.1.0"
+                    "version": "0.3.0"
                 }
             }),
         )
@@ -306,7 +317,7 @@ impl AcpClient {
             json!({
                 "sessionId": session_id,
                 "configId": config_id,
-                "value": value
+                "value": { "value": value }
             }),
         )
         .await
@@ -318,6 +329,9 @@ impl AcpClient {
         option_id: Option<String>,
         cancelled: bool,
     ) -> Result<(), String> {
+        let mut permissions = self.inner.permissions.lock().await;
+        let options = permissions.get(&id).ok_or("Permission request is no longer pending")?;
+        if !cancelled && !option_id.as_ref().is_some_and(|o| options.contains(o)) { return Err("Invalid permission option".into()); }
         let result = if cancelled {
             json!({ "outcome": { "outcome": "cancelled" } })
         } else {
@@ -333,13 +347,16 @@ impl AcpClient {
             "id": id,
             "result": result
         }))
-        .await
+        .await?;
+        permissions.remove(&id);
+        Ok(())
     }
 
     pub async fn shutdown(&self) {
         self.inner.shutting_down.store(true, Ordering::SeqCst);
         let mut child = self.child.lock().await;
         let _ = child.kill().await;
+        self.inner.pending.lock().await.clear();
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -385,8 +402,12 @@ impl AcpClient {
     }
 }
 
-fn emit_event(inner: &AcpInner, event: AcpEvent) {
-    let _ = inner.app.emit_to("main", "acp-event", event);
+fn emit_event(inner: &AcpInner, mut event: AcpEvent) {
+    if event.session_id.is_none() { event.session_id = inner.session.lock().unwrap().clone(); }
+    if let Ok(mut value) = serde_json::to_value(event) {
+        value["processId"] = json!(inner.generation);
+        let _ = inner.app.emit_to("main", "acp-event", value);
+    }
 }
 
 fn is_urgent_event(event: &AcpEvent) -> bool {
@@ -523,7 +544,7 @@ async fn handle_line(inner: &Arc<AcpInner>, line: &str) -> Option<AcpEvent> {
                 session_id: None,
                 method: None,
                 id: None,
-                payload: json!({ "message": format!("invalid json from agent: {err}"), "line": line }),
+                payload: json!({ "message": format!("invalid json from agent: {err}"), "line": "[redacted]" }),
             });
         }
     };
@@ -542,9 +563,20 @@ async fn handle_line(inner: &Arc<AcpInner>, line: &str) -> Option<AcpEvent> {
                     let message = error
                         .get("message")
                         .and_then(Value::as_str)
-                        .unwrap_or("agent error")
-                        .to_string();
-                    Err(message)
+                        .unwrap_or("agent error");
+                    let detail = error.get("data").map(|data| {
+                        if let Some(text) = data.as_str() {
+                            text.to_string()
+                        } else {
+                            data.to_string()
+                        }
+                    });
+                    Err(match detail {
+                        Some(detail) if !detail.is_empty() && detail != "null" => {
+                            format!("{message}: {detail}")
+                        }
+                        _ => message.to_string(),
+                    })
                 } else {
                     Ok(value.get("result").cloned().unwrap_or(Value::Null))
                 };
@@ -563,6 +595,8 @@ async fn handle_line(inner: &Arc<AcpInner>, line: &str) -> Option<AcpEvent> {
 
         if let Some(id) = id {
             if method == "session/request_permission" {
+                let options = params["options"].as_array().map(|a| a.iter().filter_map(|v| v["optionId"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+                inner.permissions.lock().await.insert(id, options);
                 return Some(AcpEvent {
                     kind: "permission".into(),
                     session_id,

@@ -62,17 +62,14 @@ export function PlanChip() {
     return plan && plan.type === "plan" ? planEntries(plan.entries) : [];
   }, [blocks]);
   const { done, total, current } = planProgress(entries);
-  const hasDoc = Boolean(planDoc?.exists);
-  if (!hasDoc && !entries.length && modeId !== "plan") return null;
-  const label =
-    total > 0 ? `Plan ${done}/${total}` : modeId === "plan" ? "Planning" : "Plan";
+  const label = total > 0 ? `Plan ${done}/${total}` : modeId === "plan" ? "Planning" : "Plan";
   return (
     <button
       className={`plan-chip ${modeId === "plan" ? "on" : ""}`}
       title={current || planDoc?.path || "Open plan"}
       onClick={() => openPlanPanel()}
     >
-      {label}
+      <span className="plan-chip-label">{label}</span>
       {current ? <span className="plan-chip-now">{current}</span> : null}
     </button>
   );

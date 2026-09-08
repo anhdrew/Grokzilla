@@ -7,6 +7,7 @@ export type PermissionOption = {
 };
 
 export type PermissionRequest = {
+  processId?: number;
   id: number;
   sessionId: string;
   title?: string;
@@ -136,6 +137,7 @@ export type ModelInfo = {
 };
 
 export type AcpEvent = {
+  processId?: number;
   kind: "update" | "permission" | "notification" | "exit" | "log" | "error" | string;
   sessionId?: string | null;
   method?: string | null;

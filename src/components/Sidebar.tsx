@@ -1,10 +1,8 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  isSafeSessionId,
   isTranscriptLive,
   normalizeCwd,
-  parseSessionId,
   projectName,
   relativeTime,
   sameProject,
@@ -12,6 +10,7 @@ import {
 } from "../lib/format";
 import { useApp } from "../lib/store";
 import type { ThreadInfo } from "../lib/types";
+import { useWorkspace } from "../lib/workspace";
 import { IconArchive, IconFolder, IconPlus, IconSearch, IconTerminal, IconTrash, IconUnarchive } from "./icons";
 
 function threadLabel(thread: ThreadInfo): string {
@@ -36,10 +35,13 @@ export const Sidebar = memo(function Sidebar() {
   const archivedThreads = useApp((s) => s.archivedThreads);
   const archivedProjects = useApp((s) => s.archivedProjects);
   const selectedCwd = useApp((s) => s.selectedCwd);
+  const selectedSession = useApp((s) => s.selectedSession);
   const selectProject = useApp((s) => s.selectProject);
   const unarchiveProject = useApp((s) => s.unarchiveProject);
-  const newThread = useApp((s) => s.newThread);
-  const selected = selectedCwd ? normalizeCwd(selectedCwd) : null;
+  const taskMeta = useWorkspace((s) => s.data.tasks);
+  const selected = selectedCwd
+    ? normalizeCwd(taskMeta[selectedSession ?? ""]?.repository || selectedCwd)
+    : null;
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(selected ? [selected] : []));
   const [query, setQuery] = useState("");
   const [archiveOpen, setArchiveOpen] = useState(false);
@@ -70,7 +72,8 @@ export const Sidebar = memo(function Sidebar() {
       map.set(selected, { cwd: selected, name: projectName(selected), threads: [] });
     }
     for (const thread of threads) {
-      const key = normalizeCwd(thread.cwd);
+      const repository = taskMeta[thread.sessionId]?.repository;
+      const key = normalizeCwd(repository || thread.cwd);
       const entry = map.get(key) ?? { cwd: key, name: projectName(key), threads: [] };
       entry.threads.push(thread);
       map.set(key, entry);
@@ -108,7 +111,7 @@ export const Sidebar = memo(function Sidebar() {
       archivedFolders: archivedFolders.sort(byName),
       archivedLoose: archivedLoose.sort(byName),
     };
-  }, [projects, threads, archivedProjectSet, archivedThreadSet, query, selected]);
+  }, [projects, threads, archivedProjectSet, archivedThreadSet, query, selected, taskMeta]);
 
   const archivedCount =
     archivedFolders.reduce((sum, project) => sum + Math.max(1, project.threads.length), 0) +
@@ -122,7 +125,7 @@ export const Sidebar = memo(function Sidebar() {
     if (archivedProjectSet.has(cwd)) unarchiveProject(cwd);
     selectProject(cwd);
     setExpanded((prev) => new Set(prev).add(cwd));
-    await newThread(cwd);
+    useWorkspace.getState().openNewTask(cwd);
   }
 
   function onProjectClick(cwd: string) {
@@ -141,7 +144,7 @@ export const Sidebar = memo(function Sidebar() {
       <div className="tree-head">
         <span className="kicker">Projects</span>
         <button className="tree-action" title="Open folder" onClick={() => void addProject()}>
-          <IconPlus />
+          <IconFolder />
         </button>
       </div>
       <label className="tree-search">
@@ -153,7 +156,7 @@ export const Sidebar = memo(function Sidebar() {
           spellCheck={false}
         />
       </label>
-      <SessionIdForm />
+      <PinnedTasks query={query} />
       <div className="project-tree">
         {live.map((project) => (
           <ProjectSection
@@ -194,80 +197,6 @@ export const Sidebar = memo(function Sidebar() {
   );
 });
 
-function SessionIdForm() {
-  const openBySessionId = useApp((s) => s.openBySessionId);
-  const [value, setValue] = useState("");
-  const [busy, setBusy] = useState<"view" | "open" | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  async function go(readOnly: boolean) {
-    const id = parseSessionId(value);
-    if (!id) {
-      setError("Paste a session id");
-      return;
-    }
-    if (!isSafeSessionId(id)) {
-      setError("That is not a valid session id");
-      return;
-    }
-    setBusy(readOnly ? "view" : "open");
-    setError(null);
-    try {
-      await openBySessionId(id, readOnly);
-      setValue("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  return (
-    <form
-      className="session-id-form"
-      onSubmit={(event) => {
-        event.preventDefault();
-        void go(true);
-      }}
-    >
-      <label className="tree-search session-id-field">
-        <input
-          value={value}
-          onChange={(event) => {
-            setValue(event.target.value);
-            if (error) setError(null);
-          }}
-          placeholder="Session ID"
-          spellCheck={false}
-          autoCapitalize="off"
-          autoCorrect="off"
-          aria-label="Session ID"
-        />
-      </label>
-      <div className="session-id-actions">
-        <button
-          type="submit"
-          className="ghost session-id-btn"
-          disabled={Boolean(busy)}
-          title="Hydrate from disk without attaching"
-        >
-          {busy === "view" ? "Opening…" : "Read-only"}
-        </button>
-        <button
-          type="button"
-          className="ghost session-id-btn"
-          disabled={Boolean(busy)}
-          title="Resume and attach"
-          onClick={() => void go(false)}
-        >
-          {busy === "open" ? "Opening…" : "Open"}
-        </button>
-      </div>
-      {error ? <p className="session-id-error">{error}</p> : null}
-    </form>
-  );
-}
-
 function ProjectSection({
   project,
   selected,
@@ -280,10 +209,9 @@ function ProjectSection({
   onProjectClick: (cwd: string) => void;
 }) {
   const archiveProject = useApp((s) => s.archiveProject);
-  const newThread = useApp((s) => s.newThread);
   const isSelected = sameProject(project.cwd, selected);
   const sessionIds = project.threads.map((thread) => thread.sessionId);
-  const busy = useApp((s) => workStatus(sessionIds, s.transcripts, s.sending, s.selectedSession));
+  const busy = useApp((s) => workStatus(sessionIds, s.transcripts, s.sending, s.selectedSession, s.tasks));
   return (
     <section className={`tree-group ${isSelected ? "is-current" : ""}`}>
       <div className={`tree-row project ${isSelected ? "active" : ""}`}>
@@ -301,7 +229,7 @@ function ProjectSection({
         >
           <IconArchive />
         </button>
-        <button className="tree-action on-row" title="New thread" onClick={() => void newThread(project.cwd)}>
+        <button className="tree-action on-row" title="New task" onClick={() => useWorkspace.getState().openNewTask(project.cwd)}>
           <IconPlus />
         </button>
       </div>
@@ -333,6 +261,9 @@ const ThreadRow = memo(function ThreadRow({ thread }: { thread: ThreadInfo }) {
       if (live.watchStatus === "error") return "error";
       return "idle";
     }
+    const runtime = s.tasks[thread.sessionId]?.status;
+    if (runtime === "running" || runtime === "queued") return "running";
+    if (runtime === "needs-input") return "needs-input";
     const transcript = s.transcripts[thread.sessionId];
     if (transcript?.status === "needs-input") return "needs-input";
     if (isTranscriptLive(transcript, s.sending, s.selectedSession === thread.sessionId)) {
@@ -340,21 +271,65 @@ const ThreadRow = memo(function ThreadRow({ thread }: { thread: ThreadInfo }) {
     }
     return transcript?.status ?? "idle";
   });
+  const meta = useWorkspace((s) => s.data.tasks[thread.sessionId]);
+  const [editing, setEditing] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(threadLabel(thread));
+  function commitTitle() {
+    const next = titleDraft.trim();
+    setEditing(false);
+    if (next) useWorkspace.getState().task(thread.sessionId, { title: next });
+  }
+
   return (
     <div className={`tree-row thread ${on ? "active" : ""}`}>
-      <button className="tree-hit" onClick={() => void openThread(thread)} title={threadLabel(thread)}>
-        <span className={`status ${status}`} />
-        <span className="tree-label">{threadLabel(thread)}</span>
-        {thread.headless ? (
-          <span className="tree-tag" title="grok -p headless — watch only">
-            -p
-          </span>
-        ) : viewing ? (
-          <span className="tree-tag" title="Opened read-only">
-            view
-          </span>
-        ) : null}
-        <span className="tree-time">{relativeTime(thread.updatedAt)}</span>
+      {editing ? (
+        <input
+          className="tree-rename"
+          value={titleDraft}
+          autoFocus
+          onChange={(event) => setTitleDraft(event.target.value)}
+          onBlur={commitTitle}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") commitTitle();
+            if (event.key === "Escape") setEditing(false);
+          }}
+        />
+      ) : (
+        <button
+          className="tree-hit"
+          onClick={() => void openThread(thread)}
+          onDoubleClick={(event) => {
+            event.preventDefault();
+            setTitleDraft(threadLabel(thread));
+            setEditing(true);
+          }}
+          title={threadLabel(thread)}
+        >
+          <span className={`status ${status}`} />
+          <span className="tree-label">{meta?.title || threadLabel(thread)}</span>
+          {meta?.environment === "worktree" ? (
+            <span className="tree-tag" title={meta.cwd}>
+              wt
+            </span>
+          ) : null}
+          {thread.headless ? (
+            <span className="tree-tag" title="grok -p headless — watch only">
+              -p
+            </span>
+          ) : viewing ? (
+            <span className="tree-tag" title="Opened read-only">
+              view
+            </span>
+          ) : null}
+          <span className="tree-time">{relativeTime(thread.updatedAt)}</span>
+        </button>
+      )}
+      <button
+        className="tree-action on-row"
+        title={meta?.pinned ? "Unpin" : "Pin"}
+        onClick={() => useWorkspace.getState().task(thread.sessionId, { pinned: !meta?.pinned })}
+      >
+        {meta?.pinned ? "★" : "☆"}
       </button>
       <button
         className="tree-action on-row"
@@ -377,11 +352,30 @@ const ThreadRow = memo(function ThreadRow({ thread }: { thread: ThreadInfo }) {
   );
 });
 
+function PinnedTasks({ query }: { query: string }) {
+  const threads = useApp((s) => s.threads);
+  const meta = useWorkspace((s) => s.data.tasks);
+  const pinned = threads.filter((thread) => {
+    if (!meta[thread.sessionId]?.pinned) return false;
+    if (!query) return true;
+    return (meta[thread.sessionId]?.title || threadLabel(thread)).toLowerCase().includes(query.toLowerCase());
+  });
+  if (!pinned.length) return null;
+  return (
+    <section className="tree-group pinned-group">
+      <div className="tree-kicker">Pinned</div>
+      {pinned.map((thread) => (
+        <ThreadRow key={`pin-${thread.sessionId}`} thread={thread} />
+      ))}
+    </section>
+  );
+}
+
 function ArchivedFolder({ project }: { project: ProjectGroup }) {
   const unarchiveProject = useApp((s) => s.unarchiveProject);
   const [open, setOpen] = useState(true);
   const sessionIds = project.threads.map((thread) => thread.sessionId);
-  const busy = useApp((s) => workStatus(sessionIds, s.transcripts, s.sending, s.selectedSession));
+  const busy = useApp((s) => workStatus(sessionIds, s.transcripts, s.sending, s.selectedSession, s.tasks));
   return (
     <section className="tree-group">
       <div className="tree-row project">

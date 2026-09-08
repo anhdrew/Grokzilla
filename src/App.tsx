@@ -1,16 +1,21 @@
-import { useEffect, useLayoutEffect, useRef, type DragEvent, type MouseEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type DragEvent, type MouseEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Composer } from "./components/Composer";
-import { Explorer } from "./components/Explorer";
+import { DesktopOverlays } from "./components/DesktopOverlays";
 import { PlanChip, PlanPanel } from "./components/PlanPanel";
+import { RightPanel } from "./components/RightPanel";
 import { Sidebar } from "./components/Sidebar";
+import { TerminalPanel } from "./components/TerminalPanel";
 import { TranscriptView } from "./components/Transcript";
 import { getExplorerDrag, hasExplorerDrag } from "./lib/explorer-drag";
 import { compactNumber, isReadOnlySession, projectName, previewJson } from "./lib/format";
 import { isPlanPermission } from "./lib/plan";
+import { EMPTY_QUEUE } from "./lib/runtime";
 import { useApp } from "./lib/store";
+import { listenTerminalEvents } from "./lib/terminal";
 import { estimateEmptyAt, formatLocalStamp } from "./lib/usage";
+import { useWorkspace } from "./lib/workspace";
 import type { AcpEvent } from "./lib/types";
 import "./styles.css";
 
@@ -18,13 +23,14 @@ export default function App() {
   const status = useApp((s) => s.status);
   const theme = useApp((s) => s.theme);
   const bootError = useApp((s) => s.bootError);
-  const explorerOpen = useApp((s) => s.explorerOpen);
   const bootstrap = useApp((s) => s.bootstrap);
   const login = useApp((s) => s.login);
+  const layout = useWorkspace((s) => s.data.layout);
 
   useEffect(() => {
     document.documentElement.dataset.theme = useApp.getState().theme;
     void useApp.getState().bootstrap();
+    void listenTerminalEvents();
     let unlisten: (() => void) | undefined;
     void listen<AcpEvent>("acp-event", (event) => {
       useApp.getState().handleEvent(event.payload);
@@ -35,17 +41,59 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const sync = () => {
+      const pref = useWorkspace.getState().data.settings.theme;
+      if (pref === "system") useApp.getState().setTheme("system");
+    };
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
+
+  useEffect(() => {
+    const onNotify = (event: Event) => {
+      const detail = (event as CustomEvent<{ id: string; title: string; body: string }>).detail;
+      if (!detail || !useWorkspace.getState().data.settings.notifications) return;
+      if (document.hasFocus() && !document.hidden) return;
+      if (Notification.permission !== "granted") return;
+      const note = new Notification(detail.title, { body: detail.body });
+      note.onclick = () => {
+        const thread = useApp.getState().threads.find((item) => item.sessionId === detail.id);
+        if (thread) void useApp.getState().openThread(thread);
+      };
+    };
+    window.addEventListener("task-notification", onNotify);
+    return () => window.removeEventListener("task-notification", onNotify);
+  }, []);
+
+  useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "n") {
+      const meta = event.metaKey || event.ctrlKey;
+      if (meta && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        void useApp.getState().newThread();
+        useWorkspace.setState((state) => ({ paletteOpen: !state.paletteOpen }));
+        return;
       }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "j") {
+      if (meta && event.key.toLowerCase() === "n") {
         event.preventDefault();
-        const state = useApp.getState();
-        state.setExplorerOpen(!state.explorerOpen);
+        useWorkspace.getState().openNewTask();
+        return;
+      }
+      if (meta && event.key.toLowerCase() === "j") {
+        event.preventDefault();
+        useWorkspace.getState().toggleRight();
+        return;
+      }
+      if (meta && event.key === "`") {
+        event.preventDefault();
+        useWorkspace.getState().toggleTerminal();
+        return;
       }
       if (event.key === "Escape") {
+        if (useWorkspace.getState().closeOverlays()) {
+          event.preventDefault();
+          return;
+        }
         const state = useApp.getState();
         if (state.planPanelOpen || state.planReviewOpen) {
           event.preventDefault();
@@ -111,12 +159,100 @@ export default function App() {
     <div className="app" data-theme={theme}>
       <Titlebar />
       {bootError ? <div className="banner">{bootError}</div> : null}
-      <div className={`workspace ${explorerOpen ? "" : "no-explorer"}`}>
-        <Sidebar />
-        <ChatPane />
-        {explorerOpen ? <Explorer /> : null}
+      <div className="desktop">
+        <div
+          className={`workspace ${layout.rightOpen ? "" : "no-explorer"}`}
+          style={{
+            ["--sidebar" as string]: `${layout.sidebar}px`,
+            ["--right" as string]: `${layout.right}px`,
+          }}
+        >
+          <Sidebar />
+          <Splitter
+            value={layout.sidebar}
+            min={200}
+            max={420}
+            onChange={(sidebar) =>
+              useWorkspace.getState().update({ layout: { ...useWorkspace.getState().data.layout, sidebar } })
+            }
+          />
+          <ChatPane />
+          {layout.rightOpen ? (
+            <>
+              <Splitter
+                invert
+                value={layout.right}
+                min={280}
+                max={720}
+                onChange={(right) =>
+                  useWorkspace.getState().update({ layout: { ...useWorkspace.getState().data.layout, right } })
+                }
+              />
+              <RightPanel />
+            </>
+          ) : null}
+        </div>
+        {layout.terminalOpen ? (
+          <Splitter
+            axis="y"
+            invert
+            value={layout.terminal}
+            min={140}
+            max={520}
+            onChange={(terminal) =>
+              useWorkspace.getState().update({ layout: { ...useWorkspace.getState().data.layout, terminal } })
+            }
+          />
+        ) : null}
+        <div
+          className="terminal-wrap"
+          hidden={!layout.terminalOpen}
+          style={{ ["--terminal" as string]: `${layout.terminal}px` }}
+        >
+          <TerminalPanel />
+        </div>
       </div>
+      <DesktopOverlays />
     </div>
+  );
+}
+
+function Splitter({
+  value,
+  onChange,
+  min,
+  max,
+  invert = false,
+  axis = "x",
+}: {
+  value: number;
+  onChange: (value: number) => void;
+  min: number;
+  max: number;
+  invert?: boolean;
+  axis?: "x" | "y";
+}) {
+  return (
+    <div
+      className={`splitter ${axis === "y" ? "row" : ""}`}
+      role="separator"
+      aria-orientation={axis === "y" ? "horizontal" : "vertical"}
+      onMouseDown={(event) => {
+        event.preventDefault();
+        const origin = value;
+        const start = axis === "x" ? event.clientX : event.clientY;
+        const move = (next: globalThis.MouseEvent) => {
+          const delta = (axis === "x" ? next.clientX : next.clientY) - start;
+          onChange(Math.min(max, Math.max(min, origin + (invert ? -delta : delta))));
+        };
+        const up = () => {
+          window.removeEventListener("mousemove", move);
+          window.removeEventListener("mouseup", up);
+        };
+        window.addEventListener("mousemove", move);
+        window.addEventListener("mouseup", up);
+      }}
+    />
   );
 }
 
@@ -161,32 +297,12 @@ function UsagePill() {
     .filter(Boolean)
     .join(" · ");
   return (
-    <>
-      <span className={`pill usage-pct ${heat}`} title={title} data-tauri-drag-region="false">
-        <span className={`usage-bar ${heat}`}>
-          <span style={{ width: `${pct}%` }} />
-        </span>
-        <b>{pct}%</b>
+    <span className={`pill usage-pct ${heat}`} title={title} data-tauri-drag-region="false">
+      <span className={`usage-bar ${heat}`}>
+        <span style={{ width: `${pct}%` }} />
       </span>
-      {resetStamp ? (
-        <span
-          className="pill"
-          title={
-            usage.tier
-              ? `${usage.tier} · Build quota resets ${resetStamp}`
-              : `Build quota resets ${resetStamp}`
-          }
-          data-tauri-drag-region="false"
-        >
-          next reset {resetStamp}
-        </span>
-      ) : null}
-      {emptyStamp ? (
-        <span className="pill usage-predict" title={`at this pace, out of usage ~${emptyStamp}`} data-tauri-drag-region="false">
-          out of usage ~{emptyStamp}
-        </span>
-      ) : null}
-    </>
+      <b>{pct}%</b>
+    </span>
   );
 }
 
@@ -202,9 +318,8 @@ function Titlebar() {
   });
   const mcpNote = useApp((s) => s.mcpNote);
   const theme = useApp((s) => s.theme);
-  const explorerOpen = useApp((s) => s.explorerOpen);
+  const layout = useWorkspace((s) => s.data.layout);
   const setTheme = useApp((s) => s.setTheme);
-  const setExplorerOpen = useApp((s) => s.setExplorerOpen);
   return (
     <div className="titlebar" data-tauri-drag-region="deep" onMouseDown={onWindowDrag}>
       <div className="titlebar-left" data-tauri-drag-region="deep">
@@ -239,7 +354,15 @@ function Titlebar() {
         <button
           className="icon-btn"
           data-tauri-drag-region="false"
-          title={theme === "light" ? "Cursor-style dark" : "Codex-style light"}
+          title="Command palette"
+          onClick={() => useWorkspace.setState({ paletteOpen: true })}
+        >
+          ⌘K
+        </button>
+        <button
+          className="icon-btn"
+          data-tauri-drag-region="false"
+          title={theme === "light" ? "Switch to dark" : "Switch to light"}
           onClick={() => setTheme(theme === "light" ? "dark" : "light")}
         >
           {theme === "light" ? "☾" : "☀"}
@@ -247,10 +370,26 @@ function Titlebar() {
         <button
           className="icon-btn"
           data-tauri-drag-region="false"
-          title="Toggle project explorer"
-          onClick={() => setExplorerOpen(!explorerOpen)}
+          title="Toggle files and review"
+          onClick={() => useWorkspace.getState().toggleRight()}
         >
-          ▥
+          {layout.rightOpen ? "▥" : "▤"}
+        </button>
+        <button
+          className="icon-btn"
+          data-tauri-drag-region="false"
+          title="Toggle terminal"
+          onClick={() => useWorkspace.getState().toggleTerminal()}
+        >
+          ≥_
+        </button>
+        <button
+          className="icon-btn"
+          data-tauri-drag-region="false"
+          title="Settings"
+          onClick={() => useWorkspace.setState({ settingsOpen: true })}
+        >
+          ⚙
         </button>
       </div>
     </div>
@@ -276,10 +415,19 @@ function ChatPane() {
   const refreshHeadlessWatch = useApp((s) => s.refreshHeadlessWatch);
   const permission = useApp((s) => s.permission);
   const answerPermission = useApp((s) => s.answerPermission);
+  const taskError = useApp((s) => {
+    const id = s.selectedSession;
+    return id ? s.tasks[id]?.error : undefined;
+  });
   const title = useApp((s) => {
     const thread = s.threads.find((t) => t.sessionId === s.selectedSession);
     return thread?.title || "Thread";
   });
+  const queue = useApp((s) => {
+    const id = s.selectedSession;
+    return id ? s.tasks[id]?.queue ?? EMPTY_QUEUE : EMPTY_QUEUE;
+  });
+  const [stuck, setStuck] = useState(true);
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const restoring = useRef(false);
@@ -325,6 +473,7 @@ function ChatPane() {
       if (!userIntent.current) return;
       userIntent.current = false;
       stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 96;
+      setStuck(stick.current);
     };
     el.addEventListener("wheel", markUser, { passive: true });
     el.addEventListener("touchmove", markUser, { passive: true });
@@ -368,8 +517,8 @@ function ChatPane() {
           <div className="empty-card">
             <h2>Open a project</h2>
             <p>
-              Pick a folder on the left, or paste a session id to open it read-only. Grokzilla uses
-              the same sessions as Grok Build in the terminal.
+              Pick a folder on the left. Grokzilla uses the same sessions as Grok Build in the
+              terminal.
             </p>
           </div>
         </div>
@@ -380,48 +529,23 @@ function ChatPane() {
   return (
     <main className="chat" onDragOver={onChatDragOver} onDrop={onChatDrop}>
       <div className="chat-head">
-        <h1>{blocks?.length ? title : projectName(selectedCwd)}</h1>
-        {selectedSession ? (
-          <button
-            type="button"
-            className="pill session-id-pill"
-            title={`${selectedSession} — click to copy`}
-            onClick={() => void navigator.clipboard.writeText(selectedSession)}
-          >
-            {selectedSession.slice(0, 8)}
-          </button>
-        ) : null}
-        {isHeadless ? (
-          <span
-            className={`pill ${watchStatus === "running" ? "working" : ""}`}
-            title="grok -p session — watched read-only"
-          >
-            {watchStatus === "running" ? (
-              <>
-                <span className="act-dot running" />
-                grok -p
-              </>
-            ) : (
-              "grok -p · done"
-            )}
-          </span>
-        ) : readOnly ? (
-          <span
-            className={`pill ${watchStatus === "running" ? "working" : ""}`}
-            title="Opened read-only from disk — Grokzilla will not attach"
-          >
-            {watchStatus === "running" ? (
-              <>
-                <span className="act-dot running" />
-                read-only
-              </>
-            ) : (
-              "read-only"
-            )}
-          </span>
-        ) : null}
-        <PlanChip />
-        <ThreadStatsBar />
+        <div className="chat-head-main">
+          <h1>{blocks?.length ? title : projectName(selectedCwd)}</h1>
+          <div className="chat-head-meta">
+            {selectedSession ? (
+              <button
+                type="button"
+                className="pill session-id-pill"
+                title={`${selectedSession} — click to copy`}
+                onClick={() => void navigator.clipboard.writeText(selectedSession)}
+              >
+                {selectedSession.slice(0, 8)}
+              </button>
+            ) : null}
+            <PlanChip />
+            <ThreadStatsBar />
+          </div>
+        </div>
       </div>
       <div className="transcript" ref={scroller}>
         <div className={`stack ${blocks?.length ? "has-turns" : ""}`}>
@@ -450,7 +574,29 @@ function ChatPane() {
           <WorkingLine />
         </div>
       </div>
+      {!stuck ? (
+        <button
+          className="jump-bottom"
+          onClick={() => {
+            stick.current = true;
+            setStuck(true);
+            const el = scroller.current;
+            if (el) el.scrollTop = el.scrollHeight;
+          }}
+        >
+          Jump to latest
+        </button>
+      ) : null}
       <div className="composer-wrap">
+        {taskError ? <div className="banner">{taskError}</div> : null}
+        {queue.length > 0 ? (
+          <div className="queue-banner">
+            {queue.length} prompt{queue.length === 1 ? "" : "s"} waiting
+            <button className="ghost" onClick={() => selectedSession && useApp.getState().clearQueue(selectedSession)}>
+              Clear queue
+            </button>
+          </div>
+        ) : null}
         {permission && !readOnly && !isPlanPermission(permission) ? (
           <div className="permission">
             <h3>{permission.title || "Permission required"}</h3>
