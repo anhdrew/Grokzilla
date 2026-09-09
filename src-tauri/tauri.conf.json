@@ -31,6 +31,10 @@
   "bundle": {
     "active": true,
     "targets": ["app", "dmg"],
+    "publisher": "Anh Nguyen",
+    "copyright": "© Anh Nguyen",
+    "shortDescription": "Desktop GUI for Grok Build CLI",
+    "category": "DeveloperTool",
     "macOS": {
       "minimumSystemVersion": "13.0",
       "signingIdentity": "-"

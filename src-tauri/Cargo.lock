@@ -1449,6 +1449,7 @@ version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "ignore",
+ "libc",
  "portable-pty",
  "serde",
  "serde_json",

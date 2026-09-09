@@ -1,4 +1,18 @@
+import appIcon from "../assets/app-icon.png";
+
 type IconProps = { className?: string };
+
+export function GrokLogo({
+  className = "logo",
+  title,
+  alt = "Grokzilla",
+}: {
+  className?: string;
+  title?: string;
+  alt?: string;
+}) {
+  return <img className={className} src={appIcon} alt={alt} title={title} draggable={false} />;
+}
 
 export function IconFolder({ className = "tree-ico" }: IconProps) {
   return (

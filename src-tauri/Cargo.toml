@@ -2,8 +2,9 @@
 name = "grokzilla"
 version = "0.3.0"
 description = "Desktop GUI for Grok Build CLI"
-authors = ["Grokzilla"]
+authors = ["Anh Nguyen"]
 edition = "2021"
+default-run = "grokzilla"
 
 [lib]
 name = "grokzilla_lib"
@@ -18,11 +19,19 @@ tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["io-util", "macros", "process", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "sync", "time"] }
 ignore = "0.4"
 portable-pty = "0.9"
 base64 = "0.22"
+libc = "0.2"
 
+[[bin]]
+name = "grokzilla"
+path = "src/main.rs"
+
+[[bin]]
+name = "grokzilla-ctl"
+path = "src/bin/grokzilla_ctl.rs"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

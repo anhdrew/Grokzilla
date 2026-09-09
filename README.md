@@ -47,7 +47,7 @@ pnpm tauri dev
 
 Shortcuts: `Cmd+N` new thread, `Cmd+J` review pane, `Enter` send, `Esc` stop. Hover a thread and click the terminal icon to resume it in Terminal (`grok --resume`). Use **New**, **Plan**, and **Compact** in the chat header for those actions. Slash in the composer is for skills.
 
-Headless `grok -p` sessions show in the sidebar with a `-p` badge. Grokzilla watches status and results from disk (read-only) and never attaches, so it cannot interrupt a running one-shot prompt.
+Headless `grok -p` sessions show in the sidebar with a `-p` badge. Grokzilla hydrates them from disk and will not `session/load` them. Subagent children of those runs are hidden so they cannot be stolen from a live parent.
 
 ## Architecture
 

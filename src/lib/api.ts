@@ -12,6 +12,13 @@ import type {
 
 export type SavedDrop = { path: string; rel: string };
 
+export type ChatMedia = {
+  kind: "image" | "video";
+  content: string;
+  path: string;
+  size: number;
+};
+
 const DIR_TTL_MS = 5_000;
 const dirCache = new Map<string, { at: number; rows: PathHit[] }>();
 
@@ -34,6 +41,7 @@ export const api = {
   listProjects: () => invoke<ProjectInfo[]>("list_projects"),
   listSidebar: () =>
     invoke<{ threads: ThreadInfo[]; projects: ProjectInfo[] }>("list_sidebar"),
+  findThread: (sessionId: string) => invoke<ThreadInfo>("find_thread", { sessionId }),
   hydrateSession: (sessionId: string, cwd: string) =>
     invoke<Record<string, unknown>[]>("hydrate_session", { sessionId, cwd }),
   loadToolBody: (sessionId: string, cwd: string, toolCallId: string) =>
@@ -42,8 +50,12 @@ export const api = {
       cwd,
       toolCallId,
     }),
+  readChatMedia: (sessionId: string, cwd: string, src: string) =>
+    invoke<ChatMedia>("read_chat_media", { sessionId, cwd, src }),
   readPlan: (sessionId: string, cwd: string) =>
     invoke<PlanDoc>("read_plan", { sessionId, cwd }),
+  writePlan: (sessionId: string, cwd: string, markdown: string) =>
+    invoke<PlanDoc>("write_plan", { sessionId, cwd, markdown }),
   threadStats: (sessionId: string, cwd: string) =>
     invoke<ThreadStats>("thread_stats", { sessionId, cwd }),
   deleteThread: (sessionId: string, cwd: string) =>

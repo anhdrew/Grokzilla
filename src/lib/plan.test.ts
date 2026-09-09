@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  formatPlanFeedback,
   isExitPlanLabel,
   isExitPlanUpdate,
   isPlanPermission,
@@ -8,6 +9,7 @@ import {
   planTitle,
   preferAllowOption,
   preferRejectOption,
+  quotePlanLines,
   statusLabel,
 } from "./plan";
 
@@ -69,5 +71,32 @@ describe("plan helpers", () => {
     ]);
     expect(allow?.optionId).toBe("yes");
     expect(reject?.optionId).toBe("no");
+  });
+});
+
+describe("plan review feedback", () => {
+  it("quotes a line range and formats comments", () => {
+    const lines = ["# Title", "Use Flask", "Add tests"];
+    expect(quotePlanLines(lines, 2, 2)).toBe("Use Flask");
+    expect(
+      formatPlanFeedback(
+        [
+          { id: "1", start: 2, end: 2, quote: "Use Flask", body: "Use FastAPI instead." },
+          { id: "2", start: 12, end: 14, quote: "Redis cache", body: "Skip Redis." },
+        ],
+        "Keep auth as-is.",
+      ),
+    ).toBe(
+      [
+        "Plan comments:",
+        "L2 (Use Flask): Use FastAPI instead.",
+        "L12–14 (Redis cache): Skip Redis.",
+        "",
+        "Notes:",
+        "Keep auth as-is.",
+      ].join("\n"),
+    );
+    expect(formatPlanFeedback([], "  just notes  ")).toBe("just notes");
+    expect(formatPlanFeedback([])).toBe("");
   });
 });

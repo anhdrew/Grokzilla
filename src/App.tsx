@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type DragEvent, type MouseEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { handleControlCommand, replyControl } from "./lib/control";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Composer } from "./components/Composer";
 import { DesktopOverlays } from "./components/DesktopOverlays";
@@ -7,6 +8,7 @@ import { PlanChip, PlanPanel } from "./components/PlanPanel";
 import { RightPanel } from "./components/RightPanel";
 import { Sidebar } from "./components/Sidebar";
 import { TerminalPanel } from "./components/TerminalPanel";
+import { GrokLogo } from "./components/icons";
 import { TranscriptView } from "./components/Transcript";
 import { getExplorerDrag, hasExplorerDrag } from "./lib/explorer-drag";
 import { compactNumber, isReadOnlySession, projectName, previewJson } from "./lib/format";
@@ -37,7 +39,22 @@ export default function App() {
     }).then((fn) => {
       unlisten = fn;
     });
-    return () => unlisten?.();
+    let unlistenControl: (() => void) | undefined;
+    void listen<{ requestId: number; method: string; params: Record<string, unknown> }>(
+      "control-command",
+      (event) => {
+        const { requestId, method, params } = event.payload;
+        void handleControlCommand(method, params ?? {})
+          .then((result) => replyControl(requestId, true, result))
+          .catch((err) => replyControl(requestId, false, null, err instanceof Error ? err.message : String(err)));
+      },
+    ).then((fn) => {
+      unlistenControl = fn;
+    });
+    return () => {
+      unlisten?.();
+      unlistenControl?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -112,7 +129,7 @@ export default function App() {
       <div className="onboarding" data-theme={theme}>
         <div className="window-drag" data-tauri-drag-region="deep" onMouseDown={onWindowDrag} />
         <div className="card">
-          <span className="logo">G</span>
+          <GrokLogo className="logo onboarding-logo" />
           <h2>Starting Grokzilla…</h2>
           <p>Looking for the Grok Build CLI.</p>
         </div>
@@ -124,7 +141,7 @@ export default function App() {
       <div className="onboarding" data-theme={theme}>
         <div className="window-drag" data-tauri-drag-region="deep" onMouseDown={onWindowDrag} />
         <div className="card">
-          <span className="logo">G</span>
+          <GrokLogo className="logo onboarding-logo" />
           <h2>Install Grok Build</h2>
           <p>Grokzilla is a desktop client for the Grok Build CLI. It does not bundle the agent.</p>
           <pre className="code">curl -fsSL https://x.ai/cli/install.sh | bash</pre>
@@ -141,7 +158,7 @@ export default function App() {
       <div className="onboarding" data-theme={theme}>
         <div className="window-drag" data-tauri-drag-region="deep" onMouseDown={onWindowDrag} />
         <div className="card">
-          <span className="logo">G</span>
+          <GrokLogo className="logo onboarding-logo" />
           <h2>Sign in to Grok</h2>
           <p>
             Found {status.version ?? "Grok Build"} at {status.grokPath}. Sign in with the same
@@ -323,9 +340,14 @@ function Titlebar() {
   return (
     <div className="titlebar" data-tauri-drag-region="deep" onMouseDown={onWindowDrag}>
       <div className="titlebar-left" data-tauri-drag-region="deep">
-        <span className="logo" data-tauri-drag-region="deep">
-          G
-        </span>
+        <button
+          className="logo-btn"
+          data-tauri-drag-region="false"
+          title="About Grokzilla"
+          onClick={() => useWorkspace.setState({ aboutOpen: true })}
+        >
+          <GrokLogo />
+        </button>
         <span className="brand" data-tauri-drag-region="deep">
           Grokzilla
         </span>
@@ -456,10 +478,20 @@ function ChatPane() {
 
   useEffect(() => {
     if (!readOnly) return;
-    void refreshHeadlessWatch();
-    const ms = watchStatus === "running" ? 1500 : 10_000;
-    const handle = window.setInterval(() => void refreshHeadlessWatch(), ms);
-    return () => window.clearInterval(handle);
+    let handle = 0;
+    const arm = () => {
+      window.clearInterval(handle);
+      const focused = typeof document === "undefined" || document.visibilityState === "visible";
+      const ms = watchStatus === "running" && focused ? 1500 : 10_000;
+      void refreshHeadlessWatch();
+      handle = window.setInterval(() => void refreshHeadlessWatch(), ms);
+    };
+    arm();
+    document.addEventListener("visibilitychange", arm);
+    return () => {
+      window.clearInterval(handle);
+      document.removeEventListener("visibilitychange", arm);
+    };
   }, [readOnly, selectedSession, watchStatus, refreshHeadlessWatch]);
 
   useEffect(() => {

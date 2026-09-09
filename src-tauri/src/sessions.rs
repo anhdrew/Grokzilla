@@ -1,4 +1,5 @@
 use crate::grok::grok_home;
+use base64::Engine;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -69,6 +70,9 @@ fn list_threads_in(root: &Path) -> Result<Vec<ThreadInfo>, String> {
             let Some(mut thread) = parse_summary(&summary_path, group_cwd.as_deref()) else {
                 continue;
             };
+            if is_subagent_session(&session_path) {
+                continue;
+            }
             thread.headless = is_non_interactive_session(&session_path);
             thread.watch_status = watch_status(&session_path);
             threads.push(thread);
@@ -97,28 +101,63 @@ fn find_thread_in(root: &Path, session_id: &str) -> Result<ThreadInfo, String> {
     let Some(mut thread) = parse_summary(&summary, group_cwd.as_deref()) else {
         return Err(format!("session {id} was not found"));
     };
+    if is_subagent_session(&dir) {
+        return Err(format!("session {id} was not found"));
+    }
     thread.headless = is_non_interactive_session(&dir);
     thread.watch_status = watch_status(&dir);
     Ok(thread)
 }
 
+const ATTACH_FOREIGN_ERR: &str =
+    "This is a grok -p / subagent session. Grokzilla watches it read-only and will not attach.";
+const ATTACH_LIVE_ERR: &str =
+    "This session is already running in another Grok process. Grokzilla will not attach.";
+const LIVE_FOREIGN_ERR: &str =
+    "This grok -p session is still running. Grokzilla will not attach or delete it.";
+
 pub fn reject_non_interactive(session_id: &str, cwd: &str) -> Result<(), String> {
-    if is_non_interactive_session(&find_session_dir(cwd, session_id)) {
-        return Err(
-            "This is a grok -p (headless) session. Grokzilla watches it read-only and will not attach."
-                .into(),
-        );
+    reject_non_interactive_in(&sessions_root(), session_id, cwd)
+}
+
+fn reject_non_interactive_in(root: &Path, session_id: &str, cwd: &str) -> Result<(), String> {
+    let dir = find_session_dir_in(root, cwd, session_id);
+    if is_non_interactive_session(&dir) {
+        return Err(ATTACH_FOREIGN_ERR.into());
+    }
+    Ok(())
+}
+
+pub fn reject_live_owner(session_id: &str, cwd: &str) -> Result<(), String> {
+    reject_live_owner_in(
+        &sessions_root(),
+        &active_sessions_path(),
+        session_id,
+        cwd,
+    )
+}
+
+fn reject_live_owner_in(
+    root: &Path,
+    active_path: &Path,
+    session_id: &str,
+    cwd: &str,
+) -> Result<(), String> {
+    reject_non_interactive_in(root, session_id, cwd)?;
+    if let Some(pid) = live_owner_pid_from(active_path, session_id) {
+        if pid_is_alive(pid) {
+            return Err(ATTACH_LIVE_ERR.into());
+        }
     }
     Ok(())
 }
 
 pub fn reject_live_headless(session_id: &str, cwd: &str) -> Result<(), String> {
     let dir = find_session_dir(cwd, session_id);
-    if is_non_interactive_session(&dir) && watch_status(&dir) == "running" {
-        return Err(
-            "This grok -p session is still running. Grokzilla will not attach or delete it."
-                .into(),
-        );
+    if is_non_interactive_session(&dir)
+        && (watch_status(&dir) == "running" || session_has_live_owner(session_id))
+    {
+        return Err(LIVE_FOREIGN_ERR.into());
     }
     Ok(())
 }
@@ -181,19 +220,38 @@ fn last_nonempty_line(path: &Path) -> Option<String> {
         .map(|line| line.to_string())
 }
 
+fn session_kind(session_dir: &Path) -> Option<String> {
+    let text = fs::read_to_string(session_dir.join("summary.json")).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("session_kind")
+        .and_then(Value::as_str)
+        .map(|kind| kind.to_ascii_lowercase())
+}
+
+fn is_foreign_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "headless"
+            | "single"
+            | "non_interactive"
+            | "non-interactive"
+            | "subagent"
+            | "subagent_resume"
+    )
+}
+
+fn is_subagent_kind(kind: &str) -> bool {
+    matches!(kind, "subagent" | "subagent_resume")
+}
+
+fn is_subagent_session(session_dir: &Path) -> bool {
+    session_kind(session_dir).is_some_and(|kind| is_subagent_kind(&kind))
+}
+
 fn is_non_interactive_session(session_dir: &Path) -> bool {
-    if let Ok(text) = fs::read_to_string(session_dir.join("summary.json")) {
-        if let Ok(value) = serde_json::from_str::<Value>(&text) {
-            if let Some(kind) = value.get("session_kind").and_then(Value::as_str) {
-                let kind = kind.to_ascii_lowercase();
-                if matches!(
-                    kind.as_str(),
-                    "headless" | "single" | "non_interactive" | "non-interactive"
-                ) {
-                    return true;
-                }
-            }
-        }
+    if session_kind(session_dir).is_some_and(|kind| is_foreign_kind(&kind)) {
+        return true;
     }
     let Ok(text) = fs::read_to_string(session_dir.join("prompt_context.json")) else {
         return false;
@@ -207,7 +265,57 @@ fn is_non_interactive_session(session_dir: &Path) -> bool {
     value
         .get("audience")
         .and_then(Value::as_str)
-        .is_some_and(|audience| audience.eq_ignore_ascii_case("headless"))
+        .is_some_and(|audience| {
+            audience.eq_ignore_ascii_case("headless") || audience.eq_ignore_ascii_case("subagent")
+        })
+}
+
+fn active_sessions_path() -> PathBuf {
+    grok_home().join("active_sessions.json")
+}
+
+fn session_has_live_owner(session_id: &str) -> bool {
+    live_owner_pid_from(&active_sessions_path(), session_id).is_some_and(pid_is_alive)
+}
+
+fn live_owner_pid_from(path: &Path, session_id: &str) -> Option<u32> {
+    let text = fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    let rows = value.as_array()?;
+    for row in rows {
+        let id = row
+            .get("session_id")
+            .or_else(|| row.get("sessionId"))
+            .and_then(Value::as_str)?;
+        if id != session_id {
+            continue;
+        }
+        let pid = row.get("pid").and_then(Value::as_u64)?;
+        if pid > 0 && pid <= u32::MAX as u64 {
+            return Some(pid as u32);
+        }
+    }
+    None
+}
+
+fn pid_is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let raw = pid as i32;
+        if raw <= 0 {
+            return false;
+        }
+        let rc = unsafe { libc::kill(raw, 0) };
+        if rc == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 pub fn projects_from(threads: &[ThreadInfo]) -> Vec<ProjectInfo> {
@@ -251,6 +359,28 @@ pub fn read_plan(session_id: &str, cwd: &str) -> Result<PlanDoc, String> {
     Ok(PlanDoc {
         path: path.display().to_string(),
         markdown,
+        exists: true,
+    })
+}
+
+pub fn write_plan(session_id: &str, cwd: &str, markdown: &str) -> Result<PlanDoc, String> {
+    reject_non_interactive(session_id, cwd)?;
+    write_plan_in(&sessions_root(), session_id, cwd, markdown)
+}
+
+fn write_plan_in(root: &Path, session_id: &str, cwd: &str, markdown: &str) -> Result<PlanDoc, String> {
+    if !is_safe_session_id(session_id) {
+        return Err("invalid session id".into());
+    }
+    let dir = find_session_dir_in(root, cwd, session_id);
+    if !dir.is_dir() {
+        return Err("session directory not found".into());
+    }
+    let path = dir.join("plan.md");
+    fs::write(&path, markdown).map_err(|e| e.to_string())?;
+    Ok(PlanDoc {
+        path: path.display().to_string(),
+        markdown: markdown.to_string(),
         exists: true,
     })
 }
@@ -517,6 +647,178 @@ fn find_session_dir(cwd: &str, session_id: &str) -> PathBuf {
     find_session_dir_in(&sessions_root(), cwd, session_id)
 }
 
+const CHAT_MEDIA_LIMIT: u64 = 16 * 1024 * 1024;
+
+pub fn read_chat_media(session_id: &str, cwd: &str, src: &str) -> Result<Value, String> {
+    read_chat_media_in(&sessions_root(), session_id, cwd, src)
+}
+
+fn read_chat_media_in(root: &Path, session_id: &str, cwd: &str, src: &str) -> Result<Value, String> {
+    if !is_safe_session_id(session_id) {
+        return Err("invalid session id".into());
+    }
+    let path = resolve_chat_media_path(root, session_id, cwd, src)?;
+    let size = fs::metadata(&path).map_err(|e| e.to_string())?.len();
+    if size > CHAT_MEDIA_LIMIT {
+        return Err("Media is larger than 16 MB".into());
+    }
+    let mime = media_mime(&path).ok_or_else(|| "unsupported media type".to_string())?;
+    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+    let kind = if mime.starts_with("video/") {
+        "video"
+    } else {
+        "image"
+    };
+    Ok(json!({
+        "kind": kind,
+        "content": format!(
+            "data:{mime};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        ),
+        "path": path.display().to_string(),
+        "size": size,
+    }))
+}
+
+fn resolve_chat_media_path(
+    root: &Path,
+    session_id: &str,
+    cwd: &str,
+    src: &str,
+) -> Result<PathBuf, String> {
+    let cleaned = normalize_media_src(src)?;
+    if media_mime(Path::new(&cleaned)).is_none() {
+        return Err("unsupported media type".into());
+    }
+    let session_dir = find_session_dir_in(root, cwd, session_id);
+    let session_root = fs::canonicalize(&session_dir).ok();
+    let workspace_root = fs::canonicalize(cwd).ok();
+
+    let relative = Path::new(&cleaned);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if relative.is_absolute() {
+        candidates.push(PathBuf::from(&cleaned));
+    } else {
+        let rel = cleaned.trim_start_matches("./");
+        if is_session_media_rel(rel) {
+            candidates.push(session_dir.join(rel));
+        }
+        candidates.push(PathBuf::from(cwd).join(rel));
+        candidates.push(session_dir.join(rel));
+    }
+
+    let mut last_err = "media file not found".to_string();
+    for candidate in candidates {
+        match fs::canonicalize(&candidate) {
+            Ok(resolved) => {
+                if !resolved.is_file() {
+                    last_err = "not a file".into();
+                    continue;
+                }
+                let in_session = session_root
+                    .as_ref()
+                    .map(|root| resolved.starts_with(root))
+                    .unwrap_or(false);
+                let in_workspace = workspace_root
+                    .as_ref()
+                    .map(|root| resolved.starts_with(root))
+                    .unwrap_or(false);
+                if !in_session && !in_workspace {
+                    last_err = "File is outside this session and workspace".into();
+                    continue;
+                }
+                if media_mime(&resolved).is_none() {
+                    last_err = "unsupported media type".into();
+                    continue;
+                }
+                return Ok(resolved);
+            }
+            Err(err) => last_err = err.to_string(),
+        }
+    }
+    Err(last_err)
+}
+
+fn is_session_media_rel(src: &str) -> bool {
+    let s = src.trim_start_matches("./");
+    s == "images"
+        || s == "videos"
+        || s.starts_with("images/")
+        || s.starts_with("videos/")
+}
+
+fn normalize_media_src(src: &str) -> Result<String, String> {
+    let mut s = src.trim().to_string();
+    if s.len() >= 2 {
+        let bytes = s.as_bytes();
+        let wrap = (bytes[0] == b'<' && bytes[s.len() - 1] == b'>')
+            || (bytes[0] == b'"' && bytes[s.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[s.len() - 1] == b'\'');
+        if wrap {
+            s = s[1..s.len() - 1].trim().to_string();
+        }
+    }
+    if s.is_empty() {
+        return Err("empty media src".into());
+    }
+    let lower = s.to_ascii_lowercase();
+    if lower.starts_with("javascript:")
+        || lower.starts_with("data:")
+        || lower.starts_with("blob:")
+        || lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("asset:")
+        || lower.starts_with("tauri:")
+    {
+        return Err("remote media src".into());
+    }
+    if let Some(rest) = lower
+        .strip_prefix("file://")
+        .map(|_| s.split_at(7).1.to_string())
+    {
+        let rest = rest.trim_start_matches("//");
+        let rest = rest
+            .strip_prefix("localhost")
+            .unwrap_or(&rest)
+            .to_string();
+        s = if rest.starts_with('/') {
+            rest
+        } else {
+            format!("/{rest}")
+        };
+    }
+    s = percent_decode(&s);
+    if let Some(idx) = s.find(['?', '#']) {
+        if !Path::new(&s).is_absolute() {
+            s = s[..idx].to_string();
+        }
+    }
+    if s.is_empty() || s.contains('\0') {
+        return Err("invalid media src".into());
+    }
+    Ok(s)
+}
+
+fn media_mime(path: &Path) -> Option<&'static str> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        _ => return None,
+    })
+}
+
 fn find_session_dir_in(root: &Path, cwd: &str, session_id: &str) -> PathBuf {
     let encoded = root.join(encode_cwd(cwd)).join(session_id);
     if encoded.is_dir() {
@@ -742,9 +1044,125 @@ mod tests {
     }
 
     #[test]
+    fn treats_subagent_session_kind_as_non_interactive() {
+        let root = std::env::temp_dir().join(format!("gz-sk-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("proj").join("sesschild");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("summary.json"),
+            r#"{"info":{"id":"sesschild","cwd":"/tmp/demo"},"session_kind":"subagent"}"#,
+        )
+        .unwrap();
+        assert!(super::is_non_interactive_session(&dir));
+        assert!(super::is_subagent_session(&dir));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hides_subagent_sessions_from_the_sidebar() {
+        let root = std::env::temp_dir().join(format!("gz-hide-sub-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let group = root.join("proj");
+        let parent = group.join("sessparent");
+        let child = group.join("sesschild");
+        fs::create_dir_all(&parent).unwrap();
+        fs::create_dir_all(&child).unwrap();
+        fs::write(group.join(".cwd"), "/tmp/demo").unwrap();
+        fs::write(
+            parent.join("summary.json"),
+            r#"{"info":{"id":"sessparent","cwd":"/tmp/demo"},"session_kind":"headless","updated_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        fs::write(
+            child.join("summary.json"),
+            r#"{"info":{"id":"sesschild","cwd":"/tmp/demo"},"session_kind":"subagent","updated_at":"2026-01-01T00:00:01Z"}"#,
+        )
+        .unwrap();
+        let threads = super::list_threads_in(&root).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].session_id, "sessparent");
+        assert!(threads[0].headless);
+        assert!(super::find_thread_in(&root, "sesschild").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rejects_attach_when_another_live_pid_owns_the_session() {
+        let root = std::env::temp_dir().join(format!("gz-live-root-{}", std::process::id()));
+        let active = std::env::temp_dir().join(format!("gz-live-active-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_file(&active);
+        let dir = root.join("proj").join("sesslive");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("summary.json"),
+            r#"{"info":{"id":"sesslive","cwd":"/tmp/demo"},"generated_title":"live"}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("prompt_context.json"),
+            r#"{"is_non_interactive":false,"audience":"primary"}"#,
+        )
+        .unwrap();
+        let pid = std::process::id();
+        fs::write(
+            &active,
+            format!(r#"[{{"session_id":"sesslive","pid":{pid},"cwd":"/tmp/demo"}}]"#),
+        )
+        .unwrap();
+        let err = super::reject_live_owner_in(&root, &active, "sesslive", "/tmp/demo").unwrap_err();
+        assert!(err.contains("already running"));
+        fs::write(&active, r#"[{"session_id":"sesslive","pid":999999,"cwd":"/tmp/demo"}]"#).unwrap();
+        assert!(super::reject_live_owner_in(&root, &active, "sesslive", "/tmp/demo").is_ok());
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_file(&active);
+    }
+
+    #[test]
+    fn rejects_attach_to_unmarked_headless_via_prompt_context() {
+        let root = std::env::temp_dir().join(format!("gz-pc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("proj").join("sesshead");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("summary.json"),
+            r#"{"info":{"id":"sesshead","cwd":"/tmp/demo"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("prompt_context.json"),
+            r#"{"is_non_interactive":true,"audience":"primary"}"#,
+        )
+        .unwrap();
+        let err = super::reject_non_interactive_in(&root, "sesshead", "/tmp/demo").unwrap_err();
+        assert!(err.contains("read-only"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn read_plan_rejects_unsafe_ids() {
         let err = super::read_plan("../etc", "/tmp").unwrap_err();
         assert!(err.contains("invalid"));
+    }
+
+    #[test]
+    fn writes_plan_into_the_session_dir() {
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("gz-plan-root-{pid}"));
+        let cwd = std::env::temp_dir().join(format!("gz-plan-cwd-{pid}"));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&cwd);
+        let session_id = "01sess-plan";
+        let dir = root.join(super::encode_cwd(cwd.to_str().unwrap())).join(session_id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        let doc = super::write_plan_in(&root, session_id, cwd.to_str().unwrap(), "# Title\n\nDo the thing.\n").unwrap();
+        assert!(doc.exists);
+        assert_eq!(fs::read_to_string(dir.join("plan.md")).unwrap(), "# Title\n\nDo the thing.\n");
+        assert!(super::write_plan_in(&root, "../etc", cwd.to_str().unwrap(), "nope").is_err());
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&cwd);
     }
 
     #[test]
@@ -779,6 +1197,44 @@ mod tests {
         assert!(super::find_thread_in(&root, "../etc").is_err());
         assert!(super::find_thread_in(&root, "missing-session").is_err());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reads_session_relative_chat_images() {
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("gz-media-root-{pid}"));
+        let cwd = std::env::temp_dir().join(format!("gz-media-cwd-{pid}"));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&cwd);
+        let session_id = "01sess-media";
+        let session_dir = root.join(super::encode_cwd(cwd.to_str().unwrap())).join(session_id);
+        fs::create_dir_all(session_dir.join("images")).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(session_dir.join("images/1.jpg"), b"jpeg-bytes").unwrap();
+        fs::write(cwd.join("hero.png"), b"png-bytes").unwrap();
+
+        let session_img = super::read_chat_media_in(&root, session_id, cwd.to_str().unwrap(), "images/1.jpg").unwrap();
+        assert_eq!(session_img["kind"], "image");
+        assert!(session_img["content"].as_str().unwrap().starts_with("data:image/jpeg;base64,"));
+        assert!(session_img["path"].as_str().unwrap().ends_with("images/1.jpg"));
+
+        let workspace_img = super::read_chat_media_in(&root, session_id, cwd.to_str().unwrap(), "hero.png").unwrap();
+        assert!(workspace_img["content"].as_str().unwrap().starts_with("data:image/png;base64,"));
+
+        assert!(super::read_chat_media_in(&root, session_id, cwd.to_str().unwrap(), "https://x/a.png").is_err());
+        assert!(super::read_chat_media_in(&root, "../etc", cwd.to_str().unwrap(), "images/1.jpg").is_err());
+        assert!(super::read_chat_media_in(&root, session_id, cwd.to_str().unwrap(), "/etc/hosts").is_err());
+        assert!(super::read_chat_media_in(&root, session_id, cwd.to_str().unwrap(), "notes.txt").is_err());
+        fs::write(root.join("secret.png"), b"nope").unwrap();
+        assert!(super::read_chat_media_in(
+            &root,
+            session_id,
+            cwd.to_str().unwrap(),
+            "images/../../secret.png"
+        )
+        .is_err());
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&cwd);
     }
 
     #[test]

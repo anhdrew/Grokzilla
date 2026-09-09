@@ -1,4 +1,5 @@
 mod acp;
+mod control;
 mod fssearch;
 mod grok;
 mod sessions;
@@ -165,6 +166,13 @@ async fn read_plan(session_id: String, cwd: String) -> Result<PlanDoc, String> {
 }
 
 #[tauri::command]
+async fn write_plan(session_id: String, cwd: String, markdown: String) -> Result<PlanDoc, String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::write_plan(&session_id, &cwd, &markdown))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn load_tool_body(
     session_id: String,
     cwd: String,
@@ -175,6 +183,13 @@ async fn load_tool_body(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn read_chat_media(session_id: String, cwd: String, src: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::read_chat_media(&session_id, &cwd, &src))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -220,13 +235,16 @@ async fn new_session(app: tauri::AppHandle, state: State<'_, AppState>, cwd: Str
 
 #[tauri::command]
 async fn load_session(app: tauri::AppHandle, state: State<'_, AppState>, session_id: String, cwd: String) -> Result<SessionStart, String> {
-    sessions::reject_non_interactive(&session_id, &cwd)?;
-    let mut tasks = state.tasks.lock().await;
-    if let Some(task) = tasks.get(&session_id) {
-        if task.client.is_alive().await {
-            return Ok(SessionStart { session_id, raw: json!({"processId": task.client.generation()}) });
+    {
+        let tasks = state.tasks.lock().await;
+        if let Some(task) = tasks.get(&session_id) {
+            if task.client.is_alive().await {
+                return Ok(SessionStart { session_id, raw: json!({"processId": task.client.generation()}) });
+            }
         }
     }
+    sessions::reject_live_owner(&session_id, &cwd)?;
+    let mut tasks = state.tasks.lock().await;
     if let Some(old) = tasks.remove(&session_id) { old.client.shutdown().await; }
     let client = spawn_task(app, &state).await?;
     client.bind(&session_id);
@@ -253,6 +271,9 @@ async fn send_prompt(
     attachments: Option<Vec<AttachmentIn>>,
 ) -> Result<Value, String> {
     let client = task_client(&state, &session_id).await?;
+    if let Some(cwd) = state.tasks.lock().await.get(&session_id).map(|t| t.cwd.clone()) {
+        sessions::reject_non_interactive(&session_id, &cwd)?;
+    }
     let mut blocks = vec![json!({ "type": "text", "text": text })];
     for item in attachments.unwrap_or_default() {
         if let Some(mime) = grok::image_mime(&item.path, &item.kind, item.mime_type.as_deref()) {
@@ -315,6 +336,9 @@ fn save_drop(name: String, data_base64: String) -> Result<grok::SavedDrop, Strin
 
 #[tauri::command]
 async fn cancel_prompt(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    if let Some(cwd) = state.tasks.lock().await.get(&session_id).map(|t| t.cwd.clone()) {
+        sessions::reject_non_interactive(&session_id, &cwd)?;
+    }
     let client = task_client(&state, &session_id).await?;
     client.cancel(&session_id).await
 }
@@ -325,6 +349,9 @@ async fn set_mode(
     session_id: String,
     mode_id: String,
 ) -> Result<Value, String> {
+    if let Some(cwd) = state.tasks.lock().await.get(&session_id).map(|t| t.cwd.clone()) {
+        sessions::reject_non_interactive(&session_id, &cwd)?;
+    }
     let client = task_client(&state, &session_id).await?;
     client.set_mode(&session_id, &mode_id).await
 }
@@ -335,6 +362,9 @@ async fn set_model(
     session_id: String,
     model_id: String,
 ) -> Result<Value, String> {
+    if let Some(cwd) = state.tasks.lock().await.get(&session_id).map(|t| t.cwd.clone()) {
+        sessions::reject_non_interactive(&session_id, &cwd)?;
+    }
     let client = task_client(&state, &session_id).await?;
     client.set_model(&session_id, &model_id).await
 }
@@ -346,6 +376,9 @@ async fn set_config_option(
     config_id: String,
     value: String,
 ) -> Result<Value, String> {
+    if let Some(cwd) = state.tasks.lock().await.get(&session_id).map(|t| t.cwd.clone()) {
+        sessions::reject_non_interactive(&session_id, &cwd)?;
+    }
     let client = task_client(&state, &session_id).await?;
     client
         .set_config_option(&session_id, &config_id, &value)
@@ -366,6 +399,51 @@ async fn respond_permission(
     client.respond_permission(id, option_id, cancelled).await
 }
 
+fn app_menu(app: &tauri::App) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{AboutMetadata, MenuBuilder, SubmenuBuilder};
+    let about = AboutMetadata {
+        name: Some("Grokzilla".into()),
+        version: Some(app.package_info().version.to_string()),
+        copyright: Some("© Anh Nguyen".into()),
+        credits: Some("Anh Nguyen".into()),
+        comments: Some("Desktop GUI for Grok Build CLI".into()),
+        authors: Some(vec!["Anh Nguyen".into()]),
+        website: Some("https://github.com/anhdrew/Grokzilla".into()),
+        ..Default::default()
+    };
+    let app_menu = SubmenuBuilder::new(app, "Grokzilla")
+        .about(Some(about))
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+    let edit = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+    let window = SubmenuBuilder::new(app, "Window")
+        .minimize()
+        .maximize()
+        .separator()
+        .close_window()
+        .build()?;
+    MenuBuilder::new(app)
+        .item(&app_menu)
+        .item(&edit)
+        .item(&window)
+        .build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -377,6 +455,7 @@ pub fn run() {
             grok_path: Mutex::new(None),
         })
         .manage(terminal::Terminals::default())
+        .manage(std::sync::Arc::new(control::ControlHub::new()))
         .invoke_handler(tauri::generate_handler![
             configure_runtime, close_task,
             workspace::read_workspace, workspace::write_workspace, workspace::read_workspace_file,
@@ -394,7 +473,9 @@ pub fn run() {
             find_thread,
             hydrate_session,
             read_plan,
+            write_plan,
             load_tool_body,
+            read_chat_media,
             thread_stats,
             delete_thread,
             new_session,
@@ -409,14 +490,18 @@ pub fn run() {
             list_dir,
             list_skills,
             get_billing,
-            save_drop
+            save_drop,
+            control::control_reply
         ])
         .setup(|app| {
+            app.set_menu(app_menu(app)?)?;
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.show();
                 let _ = win.unminimize();
                 let _ = win.set_focus();
             }
+            let hub = app.state::<std::sync::Arc<control::ControlHub>>().inner().clone();
+            control::start(app.handle().clone(), hub);
             Ok(())
         })
         .run(tauri::generate_context!())

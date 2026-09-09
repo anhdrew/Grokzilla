@@ -32,11 +32,11 @@ function persist() {
   }, 200);
 }
 export const useWorkspace = create<{
-  data: WorkspaceData; loaded: boolean; error: string | null; settingsOpen: boolean; paletteOpen: boolean; newTaskOpen: boolean; newTaskCwd: string | null; rightTab: 'files' | 'changes'; file: { path: string; line?: number } | null;
+  data: WorkspaceData; loaded: boolean; error: string | null; settingsOpen: boolean; aboutOpen: boolean; paletteOpen: boolean; newTaskOpen: boolean; newTaskCwd: string | null; rightTab: 'files' | 'changes'; file: { path: string; line?: number } | null;
   load: () => Promise<void>; update: (patch: Partial<WorkspaceData>) => void; task: (id: string, patch: Partial<TaskMetadata>) => void; settings: (patch: Partial<Settings>) => void; openFile: (path: string, line?: number) => void;
   toggleRight: (tab?: 'files' | 'changes') => void; toggleTerminal: () => void; openNewTask: (cwd?: string | null) => void; closeOverlays: () => boolean;
 }>((set, get) => ({
-  data: structuredClone(defaults), loaded: false, error: null, settingsOpen: false, paletteOpen: false, newTaskOpen: false, newTaskCwd: null, rightTab: 'files', file: null,
+  data: structuredClone(defaults), loaded: false, error: null, settingsOpen: false, aboutOpen: false, paletteOpen: false, newTaskOpen: false, newTaskCwd: null, rightTab: 'files', file: null,
   load: async () => {
     if (get().loaded) return;
     try {
@@ -68,6 +68,7 @@ export const useWorkspace = create<{
   closeOverlays: () => {
     const state = get();
     if (state.paletteOpen) { set({ paletteOpen: false }); return true; }
+    if (state.aboutOpen) { set({ aboutOpen: false }); return true; }
     if (state.settingsOpen) { set({ settingsOpen: false }); return true; }
     if (state.newTaskOpen) { set({ newTaskOpen: false, newTaskCwd: null }); return true; }
     return false;

@@ -125,3 +125,42 @@ export function statusLabel(status?: string) {
   if (/pend|todo|wait/i.test(status ?? "")) return "Next";
   return status ? status.replace(/_/g, " ") : "Queued";
 }
+
+export type PlanComment = {
+  id: string;
+  start: number;
+  end: number;
+  quote: string;
+  body: string;
+};
+
+export function planLines(markdown: string): string[] {
+  return markdown === "" ? [] : markdown.split("\n");
+}
+
+export function quotePlanLines(lines: string[], start: number, end: number): string {
+  const from = Math.max(1, Math.min(start, end));
+  const to = Math.max(start, end);
+  return lines.slice(from - 1, to).join("\n").trim();
+}
+
+export function formatPlanFeedback(comments: PlanComment[] = [], notes?: string): string {
+  const parts: string[] = [];
+  const usable = comments.filter((comment) => comment.body.trim());
+  if (usable.length) {
+    parts.push("Plan comments:");
+    for (const comment of usable) {
+      const loc = comment.start === comment.end ? `L${comment.start}` : `L${Math.min(comment.start, comment.end)}–${Math.max(comment.start, comment.end)}`;
+      const quote = comment.quote.replace(/\s+/g, " ").trim();
+      const snippet = quote.length > 80 ? `${quote.slice(0, 77)}…` : quote;
+      const label = snippet ? `${loc} (${snippet})` : loc;
+      parts.push(`${label}: ${comment.body.trim()}`);
+    }
+  }
+  const extra = notes?.trim() ?? "";
+  if (extra) {
+    if (parts.length) parts.push("", "Notes:", extra);
+    else parts.push(extra);
+  }
+  return parts.join("\n");
+}

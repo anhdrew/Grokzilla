@@ -1,5 +1,5 @@
 import { memo, useMemo, useState } from "react";
-import { Markdown } from "./Markdown";
+import { ChatMedia, Markdown } from "./Markdown";
 import { PlanChecklist } from "./PlanPanel";
 import {
   extractText,
@@ -9,6 +9,7 @@ import {
   toolDetail,
   toolVerb,
 } from "../lib/format";
+import { toolMedia } from "../lib/media";
 import { useApp } from "../lib/store";
 import type { ToolBlock, TranscriptBlock } from "../lib/types";
 
@@ -181,6 +182,7 @@ const ToolRow = memo(function ToolRow({ block }: { block: ToolBlock }) {
   const running = /pend|run|in_progress|progress/i.test(block.status);
   const failed = /fail|error|cancel/i.test(block.status);
   const status = failed ? "error" : running ? "running" : "done";
+  const media = toolMedia(block.output, block.content);
   const raw = extractText(block.content) || extractText(block.output);
   const clipped = raw.length > TOOL_BODY_CAP;
   const output = clipped ? `${raw.slice(0, TOOL_BODY_CAP)}…` : raw;
@@ -197,7 +199,11 @@ const ToolRow = memo(function ToolRow({ block }: { block: ToolBlock }) {
         {detail ? <span className="act-detail">{detail}</span> : null}
         <span className="act-chev">{block.collapsed ? "▸" : "▾"}</span>
       </button>
-      {block.collapsed ? null : (
+      {block.collapsed ? null : media ? (
+        <div className="act-body act-media">
+          <ChatMedia src={media.path} alt={media.filename ?? ""} />
+        </div>
+      ) : (
         <pre className="act-body act-pre">
           {body}
           {clipped || block.truncated ? "\n…" : ""}

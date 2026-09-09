@@ -1,17 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { APP_AUTHOR, APP_DESCRIPTION, APP_NAME, APP_URL, APP_VERSION } from "../lib/app-info";
 import { MODES, useApp } from "../lib/store";
 import { normalizeCwd, projectName } from "../lib/format";
 import { desktop, useWorkspace, type GitInfo, type Settings } from "../lib/workspace";
+import { GrokLogo } from "./icons";
 
 export function DesktopOverlays() {
   const paletteOpen = useWorkspace((s) => s.paletteOpen);
   const settingsOpen = useWorkspace((s) => s.settingsOpen);
+  const aboutOpen = useWorkspace((s) => s.aboutOpen);
   const newTaskOpen = useWorkspace((s) => s.newTaskOpen);
   return (
     <>
       {paletteOpen ? <CommandPalette /> : null}
       {settingsOpen ? <SettingsDialog /> : null}
+      {aboutOpen ? <AboutDialog /> : null}
       {newTaskOpen ? <NewTaskDialog /> : null}
     </>
   );
@@ -30,6 +34,7 @@ function CommandPalette() {
       { id: "changes", label: "Show changes", run: () => useWorkspace.getState().toggleRight("changes") },
       { id: "terminal", label: "Toggle terminal", run: () => useWorkspace.getState().toggleTerminal() },
       { id: "settings", label: "Settings", run: () => useWorkspace.setState({ settingsOpen: true, paletteOpen: false }) },
+      { id: "about", label: "About Grokzilla", run: () => useWorkspace.setState({ aboutOpen: true, paletteOpen: false }) },
     ];
     const projectItems = projects.map((project) => ({
       id: `project-${project.cwd}`,
@@ -182,8 +187,42 @@ function SettingsDialog() {
         </label>
         {error ? <p className="inline-error">{error}</p> : null}
         <div className="dialog-actions">
+          <button onClick={() => useWorkspace.setState({ settingsOpen: false, aboutOpen: true })}>
+            About
+          </button>
           <button className="primary" onClick={() => useWorkspace.setState({ settingsOpen: false })}>
             Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AboutDialog() {
+  const grokVersion = useApp((s) => s.status?.version);
+  return (
+    <div className="modal-backdrop" onMouseDown={() => useWorkspace.setState({ aboutOpen: false })}>
+      <div
+        className="dialog about-dialog"
+        role="dialog"
+        aria-label={`About ${APP_NAME}`}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <GrokLogo className="about-icon" />
+        <h2>{APP_NAME}</h2>
+        <p className="about-version">Version {APP_VERSION}</p>
+        <p className="about-meta">
+          Author <b>{APP_AUTHOR}</b>
+        </p>
+        <p>{APP_DESCRIPTION}</p>
+        {grokVersion ? <p className="muted">Grok Build {grokVersion}</p> : null}
+        <div className="dialog-actions">
+          <a className="ghost" href={APP_URL} target="_blank" rel="noreferrer">
+            GitHub
+          </a>
+          <button className="primary" onClick={() => useWorkspace.setState({ aboutOpen: false })}>
+            Close
           </button>
         </div>
       </div>

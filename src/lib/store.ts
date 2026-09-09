@@ -10,7 +10,14 @@ import {
   sameProject,
 } from "./format";
 import { EFFORT_CONFIG_ID, mergeModelState, modelsFrom } from "./models";
-import { isExitPlanUpdate, isPlanPermission, preferAllowOption, preferRejectOption } from "./plan";
+import {
+  formatPlanFeedback,
+  isExitPlanUpdate,
+  isPlanPermission,
+  preferAllowOption,
+  preferRejectOption,
+  type PlanComment,
+} from "./plan";
 import {
   applyUpdate,
   applyUpdates,
@@ -84,6 +91,7 @@ type AppState = {
   planDoc: PlanDoc | null;
   planPanelOpen: boolean;
   planReviewOpen: boolean;
+  planDirty: boolean;
 
   bootstrap: () => Promise<void>;
   refreshLists: () => Promise<void>;
@@ -121,9 +129,11 @@ type AppState = {
   loadPlanDoc: () => Promise<void>;
   refreshHeadlessWatch: () => Promise<void>;
   openPlanPanel: (review?: boolean) => void;
-  closePlanPanel: () => void;
-  approvePlan: () => Promise<void>;
-  revisePlan: (notes?: string) => Promise<void>;
+  closePlanPanel: () => boolean;
+  setPlanDirty: (dirty: boolean) => void;
+  savePlan: (markdown: string) => Promise<void>;
+  approvePlan: (comments?: PlanComment[], notes?: string) => Promise<void>;
+  revisePlan: (notes?: string, comments?: PlanComment[]) => Promise<void>;
   quitPlan: () => Promise<void>;
 };
 
@@ -205,28 +215,6 @@ function projection(t: TaskRuntime) {
 }
 const taskFields = { composer: 'draft', attachments: 'attachments', models: 'models', currentModel: 'currentModel', efforts: 'efforts', currentEffort: 'currentEffort', planDoc: 'planDoc', planPanelOpen: 'planPanelOpen', planReviewOpen: 'planReviewOpen' } as const;
 
-function applyModelRaw(
-  raw: unknown,
-  prev: Pick<AppState, "models" | "currentModel" | "efforts" | "currentEffort" | "transcripts">,
-  sessionId?: string | null,
-): Pick<AppState, "models" | "currentModel" | "efforts" | "currentEffort" | "transcripts"> {
-  const next = mergeModelState(
-    {
-      models: prev.models,
-      currentModel: prev.currentModel,
-      efforts: prev.efforts,
-      currentEffort: prev.currentEffort,
-    },
-    modelsFrom(raw),
-  );
-  const transcripts = { ...prev.transcripts };
-  if (sessionId && next.currentEffort) {
-    const current = transcripts[sessionId] ?? emptyTranscript();
-    transcripts[sessionId] = { ...current, effortId: next.currentEffort };
-  }
-  return { ...next, transcripts };
-}
-
 async function queuePrompt(
   get: () => AppState,
   text: string,
@@ -290,6 +278,10 @@ export const useApp = create<AppState>((baseSet, get) => {
       get().threads.find((item) => item.sessionId === id) ??
       (cwd ? { sessionId: id, cwd, title: "New task" } : undefined);
     if (!prompt || !thread || isRunning(runtime)) return;
+    if (thread.headless || isReadOnlySession(id, get().threads, get().readOnlyIds)) {
+      get().updateTask(id, { status: "failed", queue: [], loading: false, error: "This session is watch-only. Grokzilla will not attach." });
+      return;
+    }
     get().updateTask(id, { status: 'running', loading: true, queue: runtime.queue.slice(1), error: undefined });
     try {
       const loaded = await api.loadSession(id, thread.cwd);
@@ -358,6 +350,7 @@ export const useApp = create<AppState>((baseSet, get) => {
   planDoc: null,
   planPanelOpen: false,
   planReviewOpen: false,
+  planDirty: false,
   theme:
     localStorage.getItem("gz.theme") === "dark" || localStorage.getItem("gz.theme") === "light"
       ? (localStorage.getItem("gz.theme") as "light" | "dark")
@@ -375,37 +368,20 @@ export const useApp = create<AppState>((baseSet, get) => {
       const status = await api.grokStatus();
       set({ status, bootError: null });
       if (!status.grokPath || !status.loggedIn) return;
-      set({ starting: true });
+      set({ connected: true, starting: false, bootError: null });
       try {
-        const init = await api.startAgent();
-        const authMethods = (init.authMethods ?? []) as Array<{ id: string }>;
-        const method =
-          (init._meta as { defaultAuthMethodId?: string } | undefined)?.defaultAuthMethodId ??
-          authMethods[0]?.id ??
-          "cached_token";
-        const auth = await api.authenticate(method);
-        set({
-          connected: true,
-          auth,
-          ...applyModelRaw(init, get()),
-          starting: false,
-          bootError: null,
-        });
         await get().refreshLists();
         await get().loadSkills();
         void get().loadUsage();
         const { selectedCwd, threads } = get();
         if (selectedCwd) {
           const match =
-            threads.find((t) => t.sessionId === workspace.selectedSession) ??
-            threads.find((t) => t.cwd === selectedCwd && !t.headless) ??
-            threads.find((t) => t.cwd === selectedCwd);
+            threads.find((t) => t.sessionId === workspace.selectedSession && !t.headless) ??
+            threads.find((t) => t.cwd === selectedCwd && !t.headless);
           if (match) void get().openThread(match);
         }
       } catch (err) {
         set({
-          starting: false,
-          connected: false,
           bootError: err instanceof Error ? err.message : String(err),
         });
       }
@@ -419,7 +395,10 @@ export const useApp = create<AppState>((baseSet, get) => {
     const lists = await api.listSidebar();
     const ws = useWorkspace.getState().data;
     const threads: ThreadInfo[] = lists.threads.map(t => ({ ...t, title: ws.tasks[t.sessionId]?.title || t.title }));
-    for (const t of get().threads) if (!threads.some(row => row.sessionId === t.sessionId) && (get().tasks[t.sessionId] || ws.tasks[t.sessionId])) threads.push(t);
+    for (const t of get().threads) {
+      if (threads.some(row => row.sessionId === t.sessionId) || t.headless) continue;
+      if (get().tasks[t.sessionId] || ws.tasks[t.sessionId]) threads.push(t);
+    }
     const projects = [...lists.projects];
     for (const cwd of ws.projects) if (!projects.some(p => p.cwd === cwd)) projects.push({ cwd, name: cwd.split('/').pop() || cwd, threadCount: threads.filter(t => t.cwd === cwd).length });
     set({ threads, projects });
@@ -442,7 +421,7 @@ export const useApp = create<AppState>((baseSet, get) => {
   handleEvent: event => {
     const id = event.sessionId;
     if (!id) {
-      if (event.kind === 'exit' && !get().starting) set({ connected: false, bootError: 'Grok connection closed. Use Retry to reconnect.' });
+      if (event.kind === 'exit' && !get().starting) set({ bootError: 'Grok connection closed. History is preserved.' });
       return;
     }
     const task = get().tasks[id];
@@ -686,17 +665,22 @@ export const useApp = create<AppState>((baseSet, get) => {
     if (!sessionId || !thread) return;
     if (!isReadOnlySession(sessionId, get().threads, get().readOnlyIds)) return;
     try {
+      const latest = await api.findThread(sessionId).catch(() => thread);
+      const threads = get().threads.map((item) => (item.sessionId === sessionId ? { ...item, ...latest } : item));
+      if (!get().threads.some((item) => item.sessionId === sessionId)) return;
+      const prevWatch = thread.watchStatus;
+      set({ threads });
+      const unchanged = latest.watchStatus === prevWatch && latest.watchStatus !== "running";
+      if (unchanged && get().transcripts[sessionId]?.blocks.length) return;
       const updates = (await api.hydrateSession(sessionId, thread.cwd)) as SessionUpdate[];
       if (get().selectedSession !== sessionId) return;
-      await get().refreshLists();
-      const latest = get().threads.find((item) => item.sessionId === sessionId);
-      const live = latest?.watchStatus === "running";
+      const live = latest.watchStatus === "running";
       const prev = get().transcripts[sessionId];
       const next = reuseTranscriptBlocks(
         prev,
         withStableBlockIds({
           ...applyUpdates(updates),
-          status: live ? "running" : latest?.watchStatus === "error" ? "error" : "idle",
+          status: live ? "running" : latest.watchStatus === "error" ? "error" : "idle",
         }),
       );
       if (prev === next || (prev && transcriptViewKey(prev) === transcriptViewKey(next))) return;
@@ -736,34 +720,56 @@ export const useApp = create<AppState>((baseSet, get) => {
     void get().loadPlanDoc();
   },
 
-  closePlanPanel: () => {
-    set({ planPanelOpen: false, planReviewOpen: false });
+  setPlanDirty: (dirty) => {
+    if (get().planDirty === dirty) return;
+    set({ planDirty: dirty });
   },
 
-  approvePlan: async () => {
+  closePlanPanel: () => {
+    if (get().planDirty && !window.confirm("Discard unsaved plan edits?")) return false;
+    set({ planPanelOpen: false, planReviewOpen: false, planDirty: false });
+    return true;
+  },
+
+  savePlan: async (markdown) => {
+    const sessionId = get().selectedSession;
+    const cwd = get().selectedCwd;
+    if (!sessionId || !cwd) return;
+    if (isReadOnlySession(sessionId, get().threads, get().readOnlyIds)) return;
+    const doc = await api.writePlan(sessionId, cwd, markdown);
+    if (get().selectedSession !== sessionId) return;
+    set({ planDoc: doc, planDirty: false });
+  },
+
+  approvePlan: async (comments = [], notes) => {
     const permission = get().permission;
     if (permission && isPlanPermission(permission)) {
       const allow = preferAllowOption(permission.options);
       await get().answerPermission(allow?.optionId);
     }
-    set({ planReviewOpen: false, planPanelOpen: true });
+    const text = formatPlanFeedback(comments, notes);
+    set({ planReviewOpen: false, planPanelOpen: true, planDirty: false });
     void get().loadPlanDoc();
+    if (text) {
+      set({ composer: text });
+      await get().send();
+    }
   },
 
-  revisePlan: async (notes) => {
+  revisePlan: async (notes, comments = []) => {
     const permission = get().permission;
     if (permission && isPlanPermission(permission)) {
       const reject = preferRejectOption(permission.options);
       if (reject) await get().answerPermission(reject.optionId);
       else await get().answerPermission(undefined, true);
     }
-    const text = notes?.trim() ?? "";
-    set({ planReviewOpen: false, planPanelOpen: true, composer: text });
-    if (text && !get().sending) await get().send();
+    const text = formatPlanFeedback(comments, notes);
+    set({ planReviewOpen: false, planPanelOpen: true, composer: text, planDirty: false });
+    if (text) await get().send();
   },
 
   quitPlan: async () => {
-    set({ planReviewOpen: false, planPanelOpen: false });
+    set({ planReviewOpen: false, planPanelOpen: false, planDirty: false });
     if (get().sending) await get().stop();
     else if (get().permission) await get().answerPermission(undefined, true);
     await get().setMode("ask");
