@@ -1,6 +1,6 @@
 [package]
 name = "grokzilla"
-version = "0.4.0"
+version = "0.4.1"
 description = "Desktop GUI for Grok Build CLI"
 authors = ["Anh Nguyen"]
 edition = "2021"
