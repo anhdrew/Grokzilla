@@ -6,6 +6,7 @@ import type {
   PlanDoc,
   ProjectInfo,
   SkillInfo,
+  SubagentInfo,
   ThreadInfo,
   ThreadStats,
 } from "./types";
@@ -58,6 +59,10 @@ export const api = {
     invoke<PlanDoc>("write_plan", { sessionId, cwd, markdown }),
   threadStats: (sessionId: string, cwd: string) =>
     invoke<ThreadStats>("thread_stats", { sessionId, cwd }),
+  listSubagents: (sessionId: string, cwd: string) =>
+    invoke<SubagentInfo[]>("list_subagents", { sessionId, cwd }),
+  cancelSubagent: (parentSessionId: string, childSessionId: string) =>
+    invoke<void>("cancel_subagent", { parentSessionId, childSessionId }),
   deleteThread: (sessionId: string, cwd: string) =>
     invoke<void>("delete_thread", { sessionId, cwd }),
   newSession: (cwd: string) =>

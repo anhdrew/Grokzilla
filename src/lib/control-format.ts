@@ -63,8 +63,12 @@ export function sessionNeeds(
     .map((block) =>
       `${toolVerb(block.kind, block.title)} ${toolDetail(block.input, block.locations, block.title)}`.trim(),
     );
+  const runningChildren = thread?.runningSubagents ?? 0;
   const running = Boolean(
-    transcript?.status === "running" || thread?.watchStatus === "running" || inProgressTools.length,
+    transcript?.status === "running" ||
+      thread?.watchStatus === "running" ||
+      inProgressTools.length ||
+      runningChildren > 0,
   );
   let summary: string;
   if (permission) {
@@ -74,9 +78,15 @@ export function sessionNeeds(
   } else if (readOnly) {
     summary = `Read-only thread. Last assistant: ${clip(lastAssistant, 160) || "(no reply yet)"}.`;
   } else if (running) {
+    const childNote =
+      runningChildren > 0
+        ? `${runningChildren} subagent${runningChildren === 1 ? "" : "s"} running`
+        : "";
     summary = inProgressTools.length
-      ? `Turn in progress (${inProgressTools.slice(0, 3).join("; ")}).`
-      : "Turn in progress.";
+      ? `Turn in progress (${inProgressTools.slice(0, 3).join("; ")}${childNote ? `; ${childNote}` : ""}).`
+      : childNote
+        ? `${childNote[0]!.toUpperCase()}${childNote.slice(1)}.`
+        : "Turn in progress.";
   } else if (lastUser && !lastAssistant) {
     summary = `User asked: ${clip(lastUser, 200)}. No assistant reply yet.`;
   } else if (lastUser) {

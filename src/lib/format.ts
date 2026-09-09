@@ -98,6 +98,9 @@ const NAME_VERB: Record<string, string> = {
   run_terminal_command: "Run",
   web_search: "Search",
   web_fetch: "Fetch",
+  spawn_subagent: "Subagent",
+  get_command_or_subagent_output: "Wait",
+  kill_command_or_subagent: "Stop",
 };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -126,13 +129,16 @@ export function toolDetail(input: unknown, locations?: Array<{ path: string }>, 
   const rec = asRecord(input);
   const candidate =
     rec &&
-    (rec.target_file ??
+    (rec.description ??
+      rec.target_file ??
       rec.target_directory ??
       rec.path ??
       rec.command ??
       rec.pattern ??
       rec.query ??
-      rec.file_path);
+      rec.file_path ??
+      rec.subagent_type ??
+      rec.subagentType);
   if (typeof candidate === "string" && candidate) {
     return candidate.includes("/") || candidate.includes("\\") ? shortPath(candidate) : candidate;
   }
@@ -223,9 +229,11 @@ export function workStatus(
   sending = false,
   selectedSession: string | null = null,
   runtimes?: Record<string, { status?: string }>,
+  runningSubagents?: Record<string, number | null | undefined>,
 ): WorkStatus | null {
   let waiting = false;
   for (const id of sessionIds) {
+    if ((runningSubagents?.[id] ?? 0) > 0) return "running";
     const runtime = runtimes?.[id]?.status;
     if (runtime === "running" || runtime === "queued") return "running";
     if (runtime === "needs-input") waiting = true;

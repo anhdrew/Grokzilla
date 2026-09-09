@@ -13,8 +13,8 @@ The build is ad-hoc signed (no Apple Developer ID). First launch: right-click **
 To cut a new GitHub Release, bump `version` in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, then:
 
 ```bash
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
 GitHub Actions builds both Mac chips and uploads the `.dmg` files to the release.
@@ -45,7 +45,7 @@ pnpm tauri dev
 2. Start a thread or resume one from `~/.grok/sessions` (shared with the TUI).
 3. Ask Grok to work. In **Ask** mode, tool calls wait for a click.
 
-Shortcuts: `Cmd+N` new thread, `Cmd+J` review pane, `Enter` send, `Esc` stop. Hover a thread and click the terminal icon to resume it in Terminal (`grok --resume`). Use **New**, **Plan**, and **Compact** in the chat header for those actions. Slash in the composer is for skills.
+Shortcuts: `Cmd+N` new thread, `Cmd+J` review pane, `Enter` send. Hover a thread and click the terminal icon to resume it in Terminal (`grok --resume`). Use **New**, **Plan**, and **Compact** in the chat header for those actions. Slash in the composer is for skills.
 
 Headless `grok -p` sessions show in the sidebar with a `-p` badge. Grokzilla hydrates them from disk and will not `session/load` them. Subagent children of those runs are hidden so they cannot be stolen from a live parent.
 
@@ -57,6 +57,10 @@ Grokzilla (Tauri + React)
 grok agent stdio
     ~/.grok/sessions, auth.json, config.toml, MCP, skills
 ```
+
+## Disclaimer
+
+Grokzilla is an unofficial, independent project by Anh Nguyen. The author is not affiliated with, sponsored by, or commercially tied to xAI, Grok, Toho Co., Ltd., or the Godzilla franchise, and receives no commercial benefit from them. Grok is a trademark of xAI. Godzilla and related kaiju names and likenesses are trademarks of Toho. Theme artwork is fan-made and is not official merchandise.
 
 ## Out of scope (this version)
 

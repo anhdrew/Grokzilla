@@ -36,6 +36,12 @@ describe("sessionNeeds", () => {
     expect(needs.permission?.title).toBe("Run tests");
     expect(needs.summary).toContain("Waiting for permission");
   });
+
+  it("mentions running subagents", () => {
+    const needs = sessionNeeds(emptyTranscript(), { ...thread, runningSubagents: 2 }, null, false);
+    expect(needs.running).toBe(true);
+    expect(needs.summary).toContain("2 subagents running");
+  });
 });
 
 describe("buildTranscriptView", () => {

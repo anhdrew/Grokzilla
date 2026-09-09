@@ -11,7 +11,7 @@ use acp::AcpClient;
 use grok::GrokStatus;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sessions::{PlanDoc, ProjectInfo, ThreadInfo, ThreadStats};
+use sessions::{PlanDoc, ProjectInfo, SubagentInfo, ThreadInfo, ThreadStats};
 use std::sync::Arc;
 use std::collections::HashMap;
 use tauri::{Manager, State};
@@ -197,6 +197,29 @@ async fn thread_stats(session_id: String, cwd: String) -> Result<ThreadStats, St
     tauri::async_runtime::spawn_blocking(move || sessions::thread_stats(&session_id, &cwd))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn list_subagents(session_id: String, cwd: String) -> Result<Vec<SubagentInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::list_subagents(&session_id, &cwd))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn cancel_subagent(
+    state: State<'_, AppState>,
+    parent_session_id: String,
+    child_session_id: String,
+) -> Result<(), String> {
+    if parent_session_id.trim().is_empty() || child_session_id.trim().is_empty() {
+        return Err("invalid session id".into());
+    }
+    let client = task_client(&state, &parent_session_id).await.map_err(|_| {
+        "Attach this thread to stop a subagent. Grokzilla will not attach to the child session."
+            .to_string()
+    })?;
+    client.cancel(&child_session_id).await
 }
 
 #[tauri::command]
@@ -406,7 +429,7 @@ fn app_menu(app: &tauri::App) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
         version: Some(app.package_info().version.to_string()),
         copyright: Some("© Anh Nguyen".into()),
         credits: Some("Anh Nguyen".into()),
-        comments: Some("Desktop GUI for Grok Build CLI".into()),
+        comments: Some("Unofficial desktop GUI for Grok Build CLI. Not affiliated with xAI or Toho.".into()),
         authors: Some(vec!["Anh Nguyen".into()]),
         website: Some("https://github.com/anhdrew/Grokzilla".into()),
         ..Default::default()
@@ -477,6 +500,8 @@ pub fn run() {
             load_tool_body,
             read_chat_media,
             thread_stats,
+            list_subagents,
+            cancel_subagent,
             delete_thread,
             new_session,
             load_session,

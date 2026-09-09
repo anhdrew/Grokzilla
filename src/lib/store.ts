@@ -1,4 +1,5 @@
 import { useWorkspace, desktop, actualTheme, type TaskMetadata } from "./workspace";
+import { normalizeThemeId, type ThemeId, type ThemePreference } from "./themes";
 import { emptyRuntime, isRunning, nextQueued, acceptsEvent, addPermission, type TaskRuntime } from "./runtime";
 import { create } from "zustand";
 import { loadArchive, saveArchive, withArchived, withoutArchived } from "./archive";
@@ -39,11 +40,19 @@ import type {
   ProjectInfo,
   SessionUpdate,
   SkillInfo,
+  SubagentInfo,
   ThreadInfo,
   ThreadStats,
   ToolBlock,
   Transcript,
 } from "./types";
+import {
+  isLiveSubagent,
+  mergeSubagentLists,
+  runningSubagentCount,
+  subagentFromUpdate,
+  subagentsFromUpdates,
+} from "./subagents";
 
 export const MODES = [
   { id: "ask", label: "Ask" },
@@ -80,7 +89,7 @@ type AppState = {
   explorerOpen: boolean;
   mcpNote?: string;
   slashOpen: boolean;
-  theme: "light" | "dark";
+  theme: ThemeId;
   attachments: Attachment[];
   skills: SkillInfo[];
   archivedThreads: string[];
@@ -92,6 +101,10 @@ type AppState = {
   planPanelOpen: boolean;
   planReviewOpen: boolean;
   planDirty: boolean;
+  subagents: Record<string, SubagentInfo[]>;
+  inspectingSubagent: string | null;
+  subagentRosterOpen: boolean | null;
+  subagentError: string | null;
 
   bootstrap: () => Promise<void>;
   refreshLists: () => Promise<void>;
@@ -114,7 +127,7 @@ type AppState = {
   setExplorerOpen: (open: boolean) => void;
   attachEntry: (item: Attachment) => void;
   setSlashOpen: (open: boolean) => void;
-  setTheme: (theme: "light" | "dark" | "system") => void;
+  setTheme: (theme: ThemePreference) => void;
   addAttachment: (item: Attachment) => void;
   removeAttachment: (path: string) => void;
   loadSkills: (cwd?: string) => Promise<void>;
@@ -128,6 +141,12 @@ type AppState = {
   expandTool: (id: string) => Promise<void>;
   loadPlanDoc: () => Promise<void>;
   refreshHeadlessWatch: () => Promise<void>;
+  loadSubagents: (sessionId?: string) => Promise<void>;
+  inspectSubagent: (childSessionId: string) => Promise<void>;
+  closeSubagentInspector: () => void;
+  toggleSubagentRoster: () => void;
+  stopSubagent: (childSessionId: string) => Promise<void>;
+  refreshInspectedSubagent: () => Promise<void>;
   openPlanPanel: (review?: boolean) => void;
   closePlanPanel: () => boolean;
   setPlanDirty: (dirty: boolean) => void;
@@ -139,7 +158,7 @@ type AppState = {
 
 const initialArchive = loadArchive();
 
-function applyTheme(theme: "light" | "dark") {
+function applyTheme(theme: ThemeId) {
   document.documentElement.dataset.theme = theme;
   localStorage.setItem("gz.theme", theme);
 }
@@ -174,6 +193,7 @@ function isUrgentEvent(event: AcpEvent) {
 function pruneTranscripts(
   transcripts: Record<string, Transcript>,
   keepId: string | null,
+  extraKeep?: string | null,
 ): Record<string, Transcript> {
   const ids = Object.keys(transcripts);
   if (ids.length <= TRANSCRIPT_LRU) return transcripts;
@@ -181,12 +201,30 @@ function pruneTranscripts(
   const drop = ids.length - TRANSCRIPT_LRU;
   let removed = 0;
   for (const id of ids) {
-    if (id === keepId || isRunning(useApp.getState().tasks[id])) continue;
+    if (id === keepId || id === extraKeep || isRunning(useApp.getState().tasks[id])) continue;
     delete next[id];
     removed += 1;
     if (removed >= drop) break;
   }
   return next;
+}
+
+function rememberSubagents(
+  parentId: string,
+  items: SubagentInfo[],
+  get: () => AppState,
+  set: (partial: Partial<AppState>) => void,
+) {
+  const merged = mergeSubagentLists(get().subagents[parentId], items);
+  const running = runningSubagentCount(merged);
+  set({
+    subagents: { ...get().subagents, [parentId]: merged },
+    threads: get().threads.map((thread) =>
+      thread.sessionId === parentId
+        ? { ...thread, runningSubagents: running, subagentCount: merged.length }
+        : thread,
+    ),
+  });
 }
 
 function flushStreamEvents(events: AcpEvent[], get: () => AppState, set: (partial: Partial<AppState>) => void) {
@@ -205,6 +243,10 @@ function flushStreamEvents(events: AcpEvent[], get: () => AppState, set: (partia
     }
     if (isExitPlanUpdate(update)) get().updateTask(id, { planReviewOpen: true, planPanelOpen: true });
     if (id === get().selectedSession && (isExitPlanUpdate(update) || update.sessionUpdate === "plan")) void get().loadPlanDoc();
+    const spawned = subagentFromUpdate(update as Record<string, unknown>);
+    if (spawned) {
+      rememberSubagents(id, [{ ...spawned, parentSessionId: spawned.parentSessionId || id }], get, set);
+    }
   }
   set({ transcripts });
 }
@@ -351,10 +393,11 @@ export const useApp = create<AppState>((baseSet, get) => {
   planPanelOpen: false,
   planReviewOpen: false,
   planDirty: false,
-  theme:
-    localStorage.getItem("gz.theme") === "dark" || localStorage.getItem("gz.theme") === "light"
-      ? (localStorage.getItem("gz.theme") as "light" | "dark")
-      : "light",
+  subagents: {},
+  inspectingSubagent: null,
+  subagentRosterOpen: null,
+  subagentError: null,
+  theme: actualTheme(normalizeThemeId(localStorage.getItem("gz.theme"))),
 
   bootstrap: async () => {
     if (bootLock) return bootLock;
@@ -466,14 +509,24 @@ export const useApp = create<AppState>((baseSet, get) => {
     const readOnly = Boolean(opts?.readOnly || thread.headless);
     const gen = ++threadLoadGen;
     const existing = get().transcripts[id];
-    set({ selectedCwd: thread.cwd, selectedSession: id, threadStats: null, readOnlyIds: readOnly ? withArchived(get().readOnlyIds, id) : withoutArchived(get().readOnlyIds, id), transcripts: pruneTranscripts(get().transcripts, id) });
-    void get().loadSkills(thread.cwd); void get().loadThreadStats();
+    set({
+      selectedCwd: thread.cwd,
+      selectedSession: id,
+      threadStats: null,
+      inspectingSubagent: null,
+      subagentRosterOpen: null,
+      subagentError: null,
+      readOnlyIds: readOnly ? withArchived(get().readOnlyIds, id) : withoutArchived(get().readOnlyIds, id),
+      transcripts: pruneTranscripts(get().transcripts, id),
+    });
+    void get().loadSkills(thread.cwd); void get().loadThreadStats(); void get().loadSubagents(id);
     if (existing && !readOnly) { void get().loadPlanDoc(); return; }
     try {
       const updates = await api.hydrateSession(id, thread.cwd) as SessionUpdate[];
       if (isRunning(get().tasks[id])) return;
       const watch = readOnly && thread.watchStatus === 'running' ? 'running' : readOnly && thread.watchStatus === 'error' ? 'error' : 'idle';
       set({ transcripts: { ...get().transcripts, [id]: reuseTranscriptBlocks(existing, withStableBlockIds({ ...applyUpdates(updates), status: watch })) } });
+      rememberSubagents(id, subagentsFromUpdates(updates as Array<Record<string, unknown>>), get, set);
       if (gen === threadLoadGen) void get().loadPlanDoc();
     } catch(e) { if (gen === threadLoadGen) set({ bootError: String(e) }); }
   },
@@ -650,13 +703,128 @@ export const useApp = create<AppState>((baseSet, get) => {
   },
 
   toggle: (id) => {
-    const sessionId = get().selectedSession;
+    const sessionId = get().inspectingSubagent ?? get().selectedSession;
     if (!sessionId) return;
     const current = get().transcripts[sessionId];
     if (!current) return;
     set({
       transcripts: { ...get().transcripts, [sessionId]: toggleBlock(current, id) },
     });
+  },
+
+  loadSubagents: async (sessionId) => {
+    const id = sessionId ?? get().selectedSession;
+    const thread = get().threads.find((item) => item.sessionId === id);
+    const cwd = thread?.cwd ?? get().selectedCwd;
+    if (!id || !cwd) return;
+    try {
+      const disk = await api.listSubagents(id, cwd);
+      if (sessionId && get().selectedSession !== id && get().inspectingSubagent == null) {
+        /* still cache the parent roster */
+      }
+      rememberSubagents(id, disk, get, set);
+    } catch {
+      /* subagent folders are optional */
+    }
+  },
+
+  inspectSubagent: async (childSessionId) => {
+    const parentId = get().selectedSession;
+    const info = (parentId ? get().subagents[parentId] : undefined)?.find(
+      (item) => item.childSessionId === childSessionId || item.subagentId === childSessionId,
+    );
+    const cwd = info?.childCwd || get().selectedCwd;
+    if (!cwd) return;
+    set({ inspectingSubagent: childSessionId, subagentError: null, subagentRosterOpen: true });
+    try {
+      const updates = (await api.hydrateSession(childSessionId, cwd)) as SessionUpdate[];
+      if (get().inspectingSubagent !== childSessionId) return;
+      const live = info ? isLiveSubagent(info) : false;
+      const existing = get().transcripts[childSessionId];
+      set({
+        transcripts: {
+          ...pruneTranscripts(get().transcripts, get().selectedSession, childSessionId),
+          [childSessionId]: reuseTranscriptBlocks(
+            existing,
+            withStableBlockIds({
+              ...applyUpdates(updates),
+              status: live ? "running" : "idle",
+            }),
+          ),
+        },
+      });
+    } catch (err) {
+      if (get().inspectingSubagent === childSessionId) {
+        set({ subagentError: err instanceof Error ? err.message : String(err) });
+      }
+    }
+  },
+
+  closeSubagentInspector: () => {
+    if (!get().inspectingSubagent) return;
+    set({ inspectingSubagent: null, subagentError: null });
+  },
+
+  toggleSubagentRoster: () => {
+    const id = get().selectedSession;
+    const items = id ? get().subagents[id] ?? [] : [];
+    const showing = get().subagentRosterOpen ?? runningSubagentCount(items) > 0;
+    set({ subagentRosterOpen: !showing });
+  },
+
+  stopSubagent: async (childSessionId) => {
+    const parentId = get().selectedSession;
+    if (!parentId) return;
+    set({ subagentError: null });
+    try {
+      await api.cancelSubagent(parentId, childSessionId);
+      rememberSubagents(
+        parentId,
+        (get().subagents[parentId] ?? []).map((item) =>
+          item.childSessionId === childSessionId || item.subagentId === childSessionId
+            ? { ...item, status: "cancelled", watchStatus: "done" }
+            : item,
+        ),
+        get,
+        set,
+      );
+      void get().loadSubagents(parentId);
+    } catch (err) {
+      set({ subagentError: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  refreshInspectedSubagent: async () => {
+    const childId = get().inspectingSubagent;
+    const parentId = get().selectedSession;
+    if (!childId || !parentId) return;
+    const info = (get().subagents[parentId] ?? []).find(
+      (item) => item.childSessionId === childId || item.subagentId === childId,
+    );
+    const cwd = info?.childCwd || get().selectedCwd;
+    if (!cwd) return;
+    try {
+      const updates = (await api.hydrateSession(childId, cwd)) as SessionUpdate[];
+      if (get().inspectingSubagent !== childId) return;
+      const existing = get().transcripts[childId];
+      const live = info ? isLiveSubagent(info) : false;
+      const next = reuseTranscriptBlocks(
+        existing,
+        withStableBlockIds({
+          ...applyUpdates(updates),
+          status: live ? "running" : "idle",
+        }),
+      );
+      if (existing && transcriptViewKey(existing) === transcriptViewKey(next)) return;
+      set({
+        transcripts: {
+          ...get().transcripts,
+          [childId]: next,
+        },
+      });
+    } catch {
+      /* keep the last snapshot */
+    }
   },
 
   refreshHeadlessWatch: async () => {
@@ -776,8 +944,14 @@ export const useApp = create<AppState>((baseSet, get) => {
   },
 
   expandTool: async (id) => {
-    const sessionId = get().selectedSession;
-    const cwd = get().selectedCwd;
+    const sessionId = get().inspectingSubagent ?? get().selectedSession;
+    const parentId = get().selectedSession;
+    const child = parentId
+      ? (get().subagents[parentId] ?? []).find(
+          (item) => item.childSessionId === sessionId || item.subagentId === sessionId,
+        )
+      : undefined;
+    const cwd = child?.childCwd || get().selectedCwd;
     if (!sessionId || !cwd) return;
     const current = get().transcripts[sessionId];
     if (!current) return;
@@ -792,7 +966,7 @@ export const useApp = create<AppState>((baseSet, get) => {
     try {
       const full = await api.loadToolBody(sessionId, cwd, block.toolCallId);
       const live = get().transcripts[sessionId];
-      if (!live || get().selectedSession !== sessionId) return;
+      if (!live || (get().inspectingSubagent ?? get().selectedSession) !== sessionId) return;
       set({
         transcripts: {
           ...get().transcripts,
@@ -919,8 +1093,9 @@ export const useApp = create<AppState>((baseSet, get) => {
   setExplorerOpen: (open) => set({ explorerOpen: open }),
   setSlashOpen: (open) => set({ slashOpen: open }),
   setTheme: (theme) => {
-    useWorkspace.getState().settings({ theme });
-    const resolved = actualTheme(theme);
+    const preference = normalizeThemeId(theme);
+    useWorkspace.getState().settings({ theme: preference });
+    const resolved = actualTheme(preference);
     applyTheme(resolved);
     set({ theme: resolved });
   },

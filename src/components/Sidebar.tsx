@@ -211,7 +211,16 @@ function ProjectSection({
   const archiveProject = useApp((s) => s.archiveProject);
   const isSelected = sameProject(project.cwd, selected);
   const sessionIds = project.threads.map((thread) => thread.sessionId);
-  const busy = useApp((s) => workStatus(sessionIds, s.transcripts, s.sending, s.selectedSession, s.tasks));
+  const busy = useApp((s) =>
+    workStatus(
+      sessionIds,
+      s.transcripts,
+      s.sending,
+      s.selectedSession,
+      s.tasks,
+      Object.fromEntries(s.threads.map((thread) => [thread.sessionId, thread.runningSubagents])),
+    ),
+  );
   return (
     <section className={`tree-group ${isSelected ? "is-current" : ""}`}>
       <div className={`tree-row project ${isSelected ? "active" : ""}`}>
@@ -256,6 +265,7 @@ const ThreadRow = memo(function ThreadRow({ thread }: { thread: ThreadInfo }) {
   const viewing = useApp((s) => s.readOnlyIds.includes(thread.sessionId));
   const status = useApp((s) => {
     const live = s.threads.find((item) => item.sessionId === thread.sessionId);
+    if ((live?.runningSubagents ?? thread.runningSubagents ?? 0) > 0) return "running";
     if (live?.headless) {
       if (live.watchStatus === "running") return "running";
       if (live.watchStatus === "error") return "error";
@@ -310,6 +320,11 @@ const ThreadRow = memo(function ThreadRow({ thread }: { thread: ThreadInfo }) {
           {meta?.environment === "worktree" ? (
             <span className="tree-tag" title={meta.cwd}>
               wt
+            </span>
+          ) : null}
+          {(thread.runningSubagents ?? 0) > 0 ? (
+            <span className="tree-tag live" title={`${thread.runningSubagents} subagents running`}>
+              {thread.runningSubagents}
             </span>
           ) : null}
           {thread.headless ? (
@@ -375,7 +390,16 @@ function ArchivedFolder({ project }: { project: ProjectGroup }) {
   const unarchiveProject = useApp((s) => s.unarchiveProject);
   const [open, setOpen] = useState(true);
   const sessionIds = project.threads.map((thread) => thread.sessionId);
-  const busy = useApp((s) => workStatus(sessionIds, s.transcripts, s.sending, s.selectedSession, s.tasks));
+  const busy = useApp((s) =>
+    workStatus(
+      sessionIds,
+      s.transcripts,
+      s.sending,
+      s.selectedSession,
+      s.tasks,
+      Object.fromEntries(s.threads.map((thread) => [thread.sessionId, thread.runningSubagents])),
+    ),
+  );
   return (
     <section className="tree-group">
       <div className="tree-row project">

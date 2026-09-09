@@ -101,14 +101,14 @@ function XtermView({
   useEffect(() => {
     const el = host.current;
     if (!el) return;
-    const dark = document.documentElement.dataset.theme === "dark";
+    const styles = getComputedStyle(document.documentElement);
+    const background = styles.getPropertyValue("--bg-sidebar").trim() || "#161617";
+    const foreground = styles.getPropertyValue("--text").trim() || "#ececef";
     const term = new Terminal({
       cursorBlink: true,
       fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
       fontSize: 12,
-      theme: dark
-        ? { background: "#161617", foreground: "#ececef" }
-        : { background: "#ffffff", foreground: "#111113" },
+      theme: { background, foreground },
     });
     const fit = new FitAddon();
     fitRef.current = fit;

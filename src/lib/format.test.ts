@@ -52,6 +52,13 @@ describe("toolVerb / toolDetail", () => {
   it("uses grep pattern when there is no path", () => {
     expect(toolDetail({ pattern: "sessionConfig" }, [], "grep")).toBe("sessionConfig");
   });
+
+  it("labels spawn_subagent with its description", () => {
+    expect(toolVerb("", "spawn_subagent")).toBe("Subagent");
+    expect(toolDetail({ description: "scan repo", subagent_type: "explore" }, [], "spawn_subagent")).toBe(
+      "scan repo",
+    );
+  });
 });
 
 describe("extractText", () => {
@@ -115,6 +122,10 @@ describe("workStatus", () => {
     expect(
       workStatus(["a"], { a: { status: "idle" } }, false, null, { a: { status: "needs-input" } }),
     ).toBe("needs-input");
+  });
+
+  it("treats a parent with running subagents as working", () => {
+    expect(workStatus(["a"], { a: { status: "idle" } }, false, null, undefined, { a: 2 })).toBe("running");
   });
 });
 

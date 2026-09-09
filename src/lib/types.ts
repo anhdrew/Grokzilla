@@ -112,6 +112,27 @@ export type ThreadInfo = {
   messageCount?: number | null;
   headless?: boolean;
   watchStatus?: "running" | "done" | "error" | string;
+  runningSubagents?: number | null;
+  subagentCount?: number | null;
+};
+
+export type SubagentInfo = {
+  subagentId: string;
+  parentSessionId: string;
+  childSessionId: string;
+  subagentType?: string | null;
+  description?: string | null;
+  status: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  durationMs?: number | null;
+  toolCalls?: number | null;
+  turns?: number | null;
+  model?: string | null;
+  error?: string | null;
+  childCwd?: string | null;
+  watchStatus?: string;
+  activity?: string | null;
 };
 
 export type ProjectInfo = {
@@ -161,4 +182,14 @@ export type SessionUpdate = {
   modeId?: string;
   availableCommands?: Array<SlashCommand & { input?: { hint?: string } }>;
   truncated?: boolean;
+  subagentId?: string;
+  parentSessionId?: string;
+  childSessionId?: string;
+  subagentType?: string;
+  description?: string;
+  durationMs?: number;
+  toolCalls?: number;
+  turns?: number;
+  output?: unknown;
+  model?: string;
 };

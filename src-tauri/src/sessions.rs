@@ -23,6 +23,31 @@ pub struct ThreadInfo {
     pub message_count: Option<u64>,
     pub headless: bool,
     pub watch_status: String,
+    #[serde(default)]
+    pub running_subagents: u32,
+    #[serde(default)]
+    pub subagent_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentInfo {
+    pub subagent_id: String,
+    pub parent_session_id: String,
+    pub child_session_id: String,
+    pub subagent_type: Option<String>,
+    pub description: Option<String>,
+    pub status: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub tool_calls: Option<u64>,
+    pub turns: Option<u64>,
+    pub model: Option<String>,
+    pub error: Option<String>,
+    pub child_cwd: Option<String>,
+    pub watch_status: String,
+    pub activity: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -75,6 +100,9 @@ fn list_threads_in(root: &Path) -> Result<Vec<ThreadInfo>, String> {
             }
             thread.headless = is_non_interactive_session(&session_path);
             thread.watch_status = watch_status(&session_path);
+            let (running, total) = subagent_counts_in(&session_path, root);
+            thread.running_subagents = running;
+            thread.subagent_count = total;
             threads.push(thread);
         }
     }
@@ -106,7 +134,28 @@ fn find_thread_in(root: &Path, session_id: &str) -> Result<ThreadInfo, String> {
     }
     thread.headless = is_non_interactive_session(&dir);
     thread.watch_status = watch_status(&dir);
+    let (running, total) = subagent_counts_in(&dir, root);
+    thread.running_subagents = running;
+    thread.subagent_count = total;
     Ok(thread)
+}
+
+pub fn list_subagents(session_id: &str, cwd: &str) -> Result<Vec<SubagentInfo>, String> {
+    list_subagents_in(&sessions_root(), session_id, cwd)
+}
+
+fn list_subagents_in(root: &Path, session_id: &str, cwd: &str) -> Result<Vec<SubagentInfo>, String> {
+    if !is_safe_session_id(session_id) {
+        return Err("invalid session id".into());
+    }
+    let parent_dir = find_session_dir_in(root, cwd, session_id);
+    let mut items = read_subagents(&parent_dir, session_id, root);
+    items.sort_by(|a, b| {
+        live_subagent_rank(&a.status, &a.watch_status)
+            .cmp(&live_subagent_rank(&b.status, &b.watch_status))
+            .then_with(|| b.started_at.cmp(&a.started_at))
+    });
+    Ok(items)
 }
 
 const ATTACH_FOREIGN_ERR: &str =
@@ -247,6 +296,242 @@ fn is_subagent_kind(kind: &str) -> bool {
 
 fn is_subagent_session(session_dir: &Path) -> bool {
     session_kind(session_dir).is_some_and(|kind| is_subagent_kind(&kind))
+}
+
+fn subagent_counts_in(parent_dir: &Path, root: &Path) -> (u32, u32) {
+    let parent_id = parent_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let items = read_subagents(parent_dir, &parent_id, root);
+    let running = items
+        .iter()
+        .filter(|item| is_live_subagent(&item.status, &item.watch_status))
+        .count() as u32;
+    (running, items.len() as u32)
+}
+
+fn read_subagents(parent_dir: &Path, parent_id: &str, root: &Path) -> Vec<SubagentInfo> {
+    let dir = parent_dir.join("subagents");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    let mut items = Vec::new();
+    for entry in entries.flatten() {
+        let meta_path = if entry.path().is_dir() {
+            entry.path().join("meta.json")
+        } else {
+            continue;
+        };
+        if let Some(item) = parse_subagent_meta(&meta_path, parent_id, root) {
+            items.push(item);
+        }
+    }
+    items
+}
+
+fn parse_subagent_meta(path: &Path, parent_id: &str, root: &Path) -> Option<SubagentInfo> {
+    let value: Value = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
+    let subagent_id = value
+        .get("subagent_id")
+        .and_then(Value::as_str)
+        .filter(|id| is_safe_session_id(id))?
+        .to_string();
+    let child_session_id = value
+        .get("child_session_id")
+        .and_then(Value::as_str)
+        .filter(|id| is_safe_session_id(id))
+        .unwrap_or(&subagent_id)
+        .to_string();
+    let parent_session_id = value
+        .get("parent_session_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .unwrap_or(parent_id)
+        .to_string();
+    let child_cwd = value
+        .get("child_cwd")
+        .and_then(Value::as_str)
+        .map(|s| s.trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty());
+    let child_dir = find_session_dir_in(
+        root,
+        child_cwd.as_deref().unwrap_or(""),
+        &child_session_id,
+    );
+    let watch = if child_dir.is_dir() {
+        watch_status(&child_dir)
+    } else {
+        "done".into()
+    };
+    let meta_status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("running")
+        .to_ascii_lowercase();
+    let status = reconcile_subagent_status(&meta_status, &watch, &child_dir);
+    let activity = if child_dir.is_dir() {
+        child_activity(&child_dir)
+    } else {
+        None
+    };
+    Some(SubagentInfo {
+        subagent_id,
+        parent_session_id,
+        child_session_id,
+        subagent_type: value
+            .get("subagent_type")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string()),
+        description: value
+            .get("description")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string()),
+        status,
+        started_at: value
+            .get("started_at")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string()),
+        completed_at: value
+            .get("completed_at")
+            .and_then(Value::as_str)
+            .map(|s| s.to_string()),
+        duration_ms: value.get("duration_ms").and_then(Value::as_u64),
+        tool_calls: value.get("tool_calls").and_then(Value::as_u64),
+        turns: value.get("turns").and_then(Value::as_u64),
+        model: value
+            .get("effective_model_id")
+            .or_else(|| value.get("model"))
+            .and_then(Value::as_str)
+            .map(|s| s.to_string()),
+        error: value
+            .get("error")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        child_cwd,
+        watch_status: watch,
+        activity,
+    })
+}
+
+fn reconcile_subagent_status(meta_status: &str, watch: &str, child_dir: &Path) -> String {
+    if !matches!(
+        meta_status,
+        "running" | "in_progress" | "in-progress" | "pending" | "queued"
+    ) {
+        return meta_status.to_string();
+    }
+    match watch {
+        "running" => "running".into(),
+        "error" => "failed".into(),
+        _ => match last_update_kind(&child_dir.join("updates.jsonl")).as_deref() {
+            Some("error") => "failed".into(),
+            Some("turn_completed") | Some("task_completed") | Some("subagent_finished") => {
+                "completed".into()
+            }
+            _ => "completed".into(),
+        },
+    }
+}
+
+fn is_live_subagent(status: &str, watch: &str) -> bool {
+    watch == "running"
+        || matches!(
+            status,
+            "running" | "in_progress" | "in-progress" | "pending" | "queued"
+        )
+}
+
+fn live_subagent_rank(status: &str, watch: &str) -> u8 {
+    if is_live_subagent(status, watch) {
+        0
+    } else if matches!(status, "failed" | "error") {
+        1
+    } else if matches!(status, "cancelled" | "canceled") {
+        2
+    } else {
+        3
+    }
+}
+
+fn child_activity(session_dir: &Path) -> Option<String> {
+    let text = read_tail(&session_dir.join("updates.jsonl"), 64 * 1024)?;
+    let mut last: Option<String> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(update) = value
+            .get("params")
+            .and_then(|params| params.get("update"))
+            .cloned()
+            .or_else(|| value.get("update").cloned())
+        else {
+            continue;
+        };
+        let kind = update
+            .get("sessionUpdate")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        match kind {
+            "agent_thought_chunk" => last = Some("Thinking".into()),
+            "agent_message_chunk" => last = Some("Responding".into()),
+            "tool_call" | "tool_call_update" => {
+                let title = update
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                if title.is_empty() {
+                    continue;
+                }
+                let status = update
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let clipped = clip_activity(title);
+                last = Some(if is_live_tool_status(status) {
+                    format!("Running: {clipped}")
+                } else {
+                    clipped
+                });
+            }
+            _ => {}
+        }
+    }
+    last
+}
+
+fn is_live_tool_status(status: &str) -> bool {
+    matches!(
+        status.to_ascii_lowercase().as_str(),
+        "running" | "in_progress" | "in-progress" | "pending" | "queued"
+    )
+}
+
+fn clip_activity(text: &str) -> String {
+    let one_line = text.split('\n').next().unwrap_or(text).trim();
+    if one_line.chars().count() <= 72 {
+        return one_line.to_string();
+    }
+    let clipped: String = one_line.chars().take(71).collect();
+    format!("{clipped}…")
+}
+
+fn read_tail(path: &Path, max: usize) -> Option<String> {
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.seek(SeekFrom::End(0)).ok()?;
+    let start = len.saturating_sub(max as u64);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = String::new();
+    file.read_to_string(&mut buf).ok()?;
+    Some(buf)
 }
 
 fn is_non_interactive_session(session_dir: &Path) -> bool {
@@ -893,6 +1178,8 @@ fn parse_summary(path: &Path, fallback_cwd: Option<&str>) -> Option<ThreadInfo> 
         message_count: value.get("num_messages").and_then(Value::as_u64),
         headless: false,
         watch_status: "done".into(),
+        running_subagents: 0,
+        subagent_count: 0,
     })
 }
 
@@ -1084,6 +1371,105 @@ mod tests {
         assert_eq!(threads[0].session_id, "sessparent");
         assert!(threads[0].headless);
         assert!(super::find_thread_in(&root, "sesschild").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn lists_parent_subagents_and_counts_running() {
+        let root = std::env::temp_dir().join(format!("gz-sub-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let group = root.join("proj");
+        let parent = group.join("sessparent");
+        let live_child = group.join("sesslive");
+        let done_child = group.join("sessdone");
+        fs::create_dir_all(parent.join("subagents/sesslive")).unwrap();
+        fs::create_dir_all(parent.join("subagents/sessdone")).unwrap();
+        fs::create_dir_all(&live_child).unwrap();
+        fs::create_dir_all(&done_child).unwrap();
+        fs::write(group.join(".cwd"), "/tmp/demo").unwrap();
+        fs::write(
+            parent.join("summary.json"),
+            r#"{"info":{"id":"sessparent","cwd":"/tmp/demo"},"generated_title":"parent","updated_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        fs::write(
+            parent.join("prompt_context.json"),
+            r#"{"is_non_interactive":false}"#,
+        )
+        .unwrap();
+        fs::write(
+            live_child.join("summary.json"),
+            r#"{"info":{"id":"sesslive","cwd":"/tmp/demo"},"session_kind":"subagent"}"#,
+        )
+        .unwrap();
+        fs::write(
+            done_child.join("summary.json"),
+            r#"{"info":{"id":"sessdone","cwd":"/tmp/demo"},"session_kind":"subagent"}"#,
+        )
+        .unwrap();
+        fs::write(
+            live_child.join("updates.jsonl"),
+            "{\"params\":{\"update\":{\"sessionUpdate\":\"tool_call\",\"title\":\"read_file\",\"status\":\"in_progress\"}}}\n",
+        )
+        .unwrap();
+        fs::write(
+            done_child.join("updates.jsonl"),
+            "{\"params\":{\"update\":{\"sessionUpdate\":\"turn_completed\"}}}\n",
+        )
+        .unwrap();
+        fs::write(
+            parent.join("subagents/sesslive/meta.json"),
+            r#"{"subagent_id":"sesslive","parent_session_id":"sessparent","child_session_id":"sesslive","subagent_type":"explore","description":"scan repo","status":"running","started_at":"2026-01-01T00:00:00Z","effective_model_id":"grok-4.6","child_cwd":"/tmp/demo"}"#,
+        )
+        .unwrap();
+        fs::write(
+            parent.join("subagents/sessdone/meta.json"),
+            r#"{"subagent_id":"sessdone","parent_session_id":"sessparent","child_session_id":"sessdone","subagent_type":"plan","description":"write plan","status":"completed","started_at":"2026-01-01T00:00:00Z","completed_at":"2026-01-01T00:02:00Z","duration_ms":120000,"tool_calls":4,"turns":1,"child_cwd":"/tmp/demo"}"#,
+        )
+        .unwrap();
+
+        let threads = super::list_threads_in(&root).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].session_id, "sessparent");
+        assert_eq!(threads[0].subagent_count, 2);
+        assert_eq!(threads[0].running_subagents, 1);
+
+        let items = super::list_subagents_in(&root, "sessparent", "/tmp/demo").unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].subagent_id, "sesslive");
+        assert_eq!(items[0].status, "running");
+        assert_eq!(items[0].watch_status, "running");
+        assert_eq!(items[0].subagent_type.as_deref(), Some("explore"));
+        assert_eq!(items[0].activity.as_deref(), Some("Running: read_file"));
+        assert_eq!(items[1].subagent_id, "sessdone");
+        assert_eq!(items[1].status, "completed");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn treats_stale_running_subagent_as_completed() {
+        let root = std::env::temp_dir().join(format!("gz-sub-stale-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let group = root.join("proj");
+        let parent = group.join("sessparent");
+        let child = group.join("sesschild");
+        fs::create_dir_all(parent.join("subagents/sesschild")).unwrap();
+        fs::create_dir_all(&child).unwrap();
+        fs::write(
+            parent.join("subagents/sesschild/meta.json"),
+            r#"{"subagent_id":"sesschild","parent_session_id":"sessparent","child_session_id":"sesschild","status":"running"}"#,
+        )
+        .unwrap();
+        fs::write(
+            child.join("updates.jsonl"),
+            "{\"params\":{\"update\":{\"sessionUpdate\":\"turn_completed\"}}}\n",
+        )
+        .unwrap();
+        fs::write(child.join("summary.json"), "{}").unwrap();
+        let items = super::list_subagents_in(&root, "sessparent", "/tmp/demo").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].status, "completed");
+        assert_eq!(items[0].watch_status, "done");
         let _ = fs::remove_dir_all(&root);
     }
 

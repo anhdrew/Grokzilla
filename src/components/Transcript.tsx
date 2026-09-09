@@ -1,120 +1,118 @@
-import { memo, useMemo, useState } from "react";
-import { ChatMedia, Markdown } from "./Markdown";
-import { PlanChecklist } from "./PlanPanel";
+import { createContext, memo, useContext, useMemo, useState } from "react";
 import {
-  extractText,
-  modeLabel,
-  planEntries,
-  previewJson,
-  toolDetail,
-  toolVerb,
-} from "../lib/format";
+  ASSISTANT_CLAMP,
+  ASSISTANT_PREVIEW,
+  TOOL_BODY_CAP,
+  USER_CLAMP,
+  clampText,
+  foldedRailItems,
+  groupTranscript,
+  isFailedToolStatus,
+  isLiveToolStatus,
+  railStepCount,
+  railSummary,
+  shouldClamp,
+  toolBodyText,
+  toolRowDetail,
+  verbRunDetail,
+  verbRunNoun,
+  type RailItem,
+} from "../lib/activity";
+import { modeLabel, planEntries, previewJson, toolVerb } from "../lib/format";
+import { childIdFromTool, isSubagentTool } from "../lib/subagents";
 import { toolMedia } from "../lib/media";
 import { useApp } from "../lib/store";
 import type { ToolBlock, TranscriptBlock } from "../lib/types";
+import { ChatMedia, Markdown } from "./Markdown";
+import { PlanChecklist } from "./PlanPanel";
 
-const TOOL_BODY_CAP = 32_000;
+const TranscriptSession = createContext<string | null>(null);
 
-type Group =
-  | { type: "message"; block: TranscriptBlock }
-  | { type: "activity"; items: TranscriptBlock[] };
-
-function groupBlocks(blocks: TranscriptBlock[]): Group[] {
-  const groups: Group[] = [];
-  for (const block of blocks) {
-    if (block.type === "mode") continue;
-    if (block.type === "thinking" || block.type === "tool") {
-      const last = groups[groups.length - 1];
-      if (last?.type === "activity") last.items.push(block);
-      else groups.push({ type: "activity", items: [block] });
-    } else {
-      groups.push({ type: "message", block });
-    }
-  }
-  return groups;
+function useTranscriptSession() {
+  const override = useContext(TranscriptSession);
+  return useApp((s) => override ?? s.inspectingSubagent ?? s.selectedSession);
 }
 
 export const TranscriptView = memo(function TranscriptView({
   blocks,
+  sessionId,
 }: {
   blocks: TranscriptBlock[];
+  sessionId?: string | null;
 }) {
-  const groups = useMemo(() => groupBlocks(blocks), [blocks]);
+  const sending = useApp((s) => s.sending);
+  const tailId = blocks[blocks.length - 1]?.id;
+  const groups = useMemo(
+    () => groupTranscript(blocks, sending, tailId),
+    [blocks, sending, tailId],
+  );
   return (
-    <>
+    <TranscriptSession.Provider value={sessionId ?? null}>
       {groups.map((group, index) => {
-        if (group.type === "activity") {
-          return <ActivityGroup key={group.items[0]?.id ?? index} items={group.items} />;
+        if (group.type === "rail") {
+          return <ActivityRail key={group.id || index} items={group.items} />;
         }
         return <MessageBlock key={group.block.id} block={group.block} />;
       })}
-    </>
+    </TranscriptSession.Provider>
   );
 });
 
-function activityLabel(block: TranscriptBlock): string {
-  if (block.type === "thinking") return "Thought";
-  if (block.type === "mode") return modeLabel(block.modeId);
-  if (block.type === "tool") return toolVerb(block.kind, block.title);
-  return "Step";
-}
-
-function isLiveBlock(block: TranscriptBlock, sending: boolean, last: TranscriptBlock): boolean {
-  if (block.type === "tool") return /pend|run|in_progress|progress/i.test(block.status);
-  if (block.type === "thinking") return sending && block === last;
-  return false;
-}
-
-function sameBlocks(a: TranscriptBlock[], b: TranscriptBlock[]) {
-  if (a === b) return true;
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i += 1) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
-}
-
-const ActivityGroup = memo(
-  function ActivityGroup({ items }: { items: TranscriptBlock[] }) {
+const ActivityRail = memo(function ActivityRail({ items }: { items: RailItem[] }) {
   const sending = useApp((s) => s.sending);
+  const sessionId = useTranscriptSession();
+  const tailId = useApp((s) => {
+    const id = sessionId;
+    const blocks = id ? s.transcripts[id]?.blocks : undefined;
+    return blocks?.[blocks.length - 1]?.id;
+  });
   const [open, setOpen] = useState(false);
-  const last = items[items.length - 1]!;
-  const live = items.filter((block) => isLiveBlock(block, sending, last));
-  const summary = useMemo(() => {
-    const labels = items.map(activityLabel);
-    const unique = [...new Set(labels)];
-    return unique.slice(0, 4).join(" · ");
-  }, [items]);
+  const live = useMemo(
+    () => foldedRailItems(items, sending, tailId),
+    [items, sending, tailId],
+  );
+  const steps = railStepCount(items);
+  const summary = useMemo(() => railSummary(items), [items]);
   const shown = open ? items : live;
-  if (items.length === 1) {
+  const foldable = items.length > 1 || items[0]?.type === "verbRun";
+  if (!foldable) {
     return (
       <div className="activity">
-        <ActivityBlock block={items[0]!} />
+        <RailItemRow item={items[0]!} />
       </div>
     );
   }
   return (
     <div className={`activity ${open ? "" : "folded"}`}>
       <button className="act activity-toggle" onClick={() => setOpen((value) => !value)}>
-        <span className="act-verb">{items.length} steps</span>
+        <span className="act-verb">{steps} steps</span>
         <span className="act-detail">{summary}</span>
         <span className="act-chev">{open ? "▾" : "▸"}</span>
       </button>
-      {shown.map((block) => (
-        <ActivityBlock key={block.id} block={block} />
+      {shown.map((item) => (
+        <RailItemRow key={railItemKey(item)} item={item} />
       ))}
     </div>
   );
-  },
-  (prev, next) => sameBlocks(prev.items, next.items),
-);
+});
+
+function railItemKey(item: RailItem): string {
+  if (item.type === "verbRun") return item.id;
+  return item.block.id;
+}
+
+function RailItemRow({ item }: { item: RailItem }) {
+  if (item.type === "thought") return <ThoughtRow block={item.block} />;
+  if (item.type === "verbRun") return <VerbRunRow verb={item.verb} tools={item.tools} />;
+  return <ToolRow block={item.block} />;
+}
 
 const MessageBlock = memo(function MessageBlock({ block }: { block: TranscriptBlock }) {
   if (block.type === "user") {
     return (
       <article className="turn turn-user">
         <div className="bubble-user">
-          <Markdown text={block.text} />
+          <ClampedMarkdown text={block.text} limits={USER_CLAMP} preview={USER_CLAMP} />
         </div>
       </article>
     );
@@ -122,7 +120,7 @@ const MessageBlock = memo(function MessageBlock({ block }: { block: TranscriptBl
   if (block.type === "assistant") {
     return (
       <article className="turn turn-asst">
-        <Markdown text={block.text} />
+        <ClampedMarkdown text={block.text} limits={ASSISTANT_CLAMP} preview={ASSISTANT_PREVIEW} liveTail />
       </article>
     );
   }
@@ -139,79 +137,166 @@ const MessageBlock = memo(function MessageBlock({ block }: { block: TranscriptBl
       </div>
     );
   }
-  return <ActivityBlock block={block} />;
-});
-
-const ActivityBlock = memo(function ActivityBlock({ block }: { block: TranscriptBlock }) {
-  const toggle = useApp((s) => s.toggle);
-  const sending = useApp((s) => s.sending);
-  const tail = useApp((s) => {
-    const id = s.selectedSession;
-    const blocks = id ? s.transcripts[id]?.blocks : undefined;
-    return blocks?.[blocks.length - 1]?.id === block.id;
-  });
-  if (block.type === "thinking") {
-    const preview = block.text.trim().split(/\n/)[0] ?? "";
-    const live = !block.collapsed || (sending && tail);
-    return (
-      <div className="act-wrap">
-        <button className="act think-act" onClick={() => toggle(block.id)}>
-          <StatusDot status={live ? "running" : "done"} />
-          <span className="act-verb">Thought</span>
-          {block.collapsed ? <span className="act-detail">{preview}</span> : null}
-          <span className="act-chev">{block.collapsed ? "▸" : "▾"}</span>
-        </button>
-        {block.collapsed ? null : <div className="act-body think-body">{block.text}</div>}
-      </div>
-    );
-  }
-  if (block.type === "tool") {
-    return <ToolRow block={block} />;
-  }
-  if (block.type === "mode") {
-    return <div className="mode-chip">{modeLabel(block.modeId)}</div>;
-  }
+  if (block.type === "thinking") return <ThoughtRow block={block} />;
+  if (block.type === "tool") return <ToolRow block={block} />;
+  if (block.type === "mode") return <div className="mode-chip">{modeLabel(block.modeId)}</div>;
   return null;
 });
 
-const ToolRow = memo(function ToolRow({ block }: { block: ToolBlock }) {
+function ClampedMarkdown({
+  text,
+  limits,
+  preview,
+  liveTail = false,
+}: {
+  text: string;
+  limits: { lines: number; chars: number };
+  preview: { lines: number; chars: number };
+  liveTail?: boolean;
+}) {
+  const sending = useApp((s) => s.sending);
+  const sessionId = useTranscriptSession();
+  const tail = useApp((s) => {
+    const id = sessionId;
+    const blocks = id ? s.transcripts[id]?.blocks : undefined;
+    return blocks?.[blocks.length - 1]?.type === "assistant";
+  });
+  const [open, setOpen] = useState(false);
+  const streaming = liveTail && sending && tail;
+  const over = !streaming && shouldClamp(text, limits);
+  const shown = open || !over ? text : clampText(text, preview);
+  return (
+    <div className={`clamp ${over && !open ? "is-folded" : ""}`}>
+      <Markdown text={shown} />
+      {over ? (
+        <button className="clamp-toggle" onClick={() => setOpen((value) => !value)}>
+          {open ? "Show less" : "Show more"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+const ThoughtRow = memo(function ThoughtRow({ block }: { block: Extract<TranscriptBlock, { type: "thinking" }> }) {
+  const toggle = useApp((s) => s.toggle);
+  const sending = useApp((s) => s.sending);
+  const sessionId = useTranscriptSession();
+  const tail = useApp((s) => {
+    const id = sessionId;
+    const blocks = id ? s.transcripts[id]?.blocks : undefined;
+    return blocks?.[blocks.length - 1]?.id === block.id;
+  });
+  const preview = block.text.trim().split(/\n/)[0] ?? "";
+  const live = !block.collapsed || (sending && tail);
+  return (
+    <div className="act-wrap">
+      <button className="act think-act" onClick={() => toggle(block.id)}>
+        <StatusDot status={live ? "running" : "done"} />
+        <span className="act-verb">Thought</span>
+        {block.collapsed ? <span className="act-detail">{preview}</span> : null}
+        <span className="act-chev">{block.collapsed ? "▸" : "▾"}</span>
+      </button>
+      {block.collapsed ? null : <div className="act-body think-body">{block.text}</div>}
+    </div>
+  );
+});
+
+const VerbRunRow = memo(function VerbRunRow({ verb, tools }: { verb: string; tools: ToolBlock[] }) {
+  const [open, setOpen] = useState(false);
+  const live = tools.some((tool) => isLiveToolStatus(tool.status));
+  const failed = tools.some((tool) => isFailedToolStatus(tool.status));
+  const status = failed ? "error" : live ? "running" : "done";
+  const detail = verbRunDetail(tools);
+  return (
+    <div className={`verb-run ${open ? "is-open" : ""}`}>
+      <button className="act" onClick={() => setOpen((value) => !value)}>
+        <StatusDot status={status} />
+        <span className="act-verb">{verb}</span>
+        <span className="act-detail">
+          {verbRunNoun(verb, tools.length)}
+          {detail ? ` · ${detail}` : ""}
+        </span>
+        <span className="act-chev">{open ? "▾" : "▸"}</span>
+      </button>
+      {open
+        ? tools.map((tool) => <ToolRow key={tool.id} block={tool} nested />)
+        : null}
+    </div>
+  );
+});
+
+const ToolRow = memo(function ToolRow({ block, nested = false }: { block: ToolBlock; nested?: boolean }) {
   const toggle = useApp((s) => s.toggle);
   const expandTool = useApp((s) => s.expandTool);
+  const inspectSubagent = useApp((s) => s.inspectSubagent);
+  const subagents = useApp((s) => {
+    const id = s.selectedSession;
+    return id ? s.subagents[id] : undefined;
+  });
   const verb = toolVerb(block.kind, block.title);
-  const detail = toolDetail(block.input, block.locations, block.title);
-  const running = /pend|run|in_progress|progress/i.test(block.status);
-  const failed = /fail|error|cancel/i.test(block.status);
+  const detail = toolRowDetail(block);
+  const running = isLiveToolStatus(block.status);
+  const failed = isFailedToolStatus(block.status);
   const status = failed ? "error" : running ? "running" : "done";
   const media = toolMedia(block.output, block.content);
-  const raw = extractText(block.content) || extractText(block.output);
+  const raw = toolBodyText(block);
   const clipped = raw.length > TOOL_BODY_CAP;
   const output = clipped ? `${raw.slice(0, TOOL_BODY_CAP)}…` : raw;
-  const body = output || (block.collapsed ? "" : previewJson(block.input, 800));
+  const childId =
+    isSubagentTool(block.title) &&
+    (childIdFromTool(block) ||
+      subagents?.find((item) => item.description && detail && item.description === detail)?.childSessionId);
   function onToggle() {
     if (block.collapsed && block.truncated) void expandTool(block.id);
     else toggle(block.id);
   }
   return (
-    <div className="act-wrap">
+    <div className={`act-wrap ${nested ? "nested" : ""}`}>
       <button className="act" onClick={onToggle}>
         <StatusDot status={status} />
-        <span className="act-verb">{verb}</span>
-        {detail ? <span className="act-detail">{detail}</span> : null}
+        {nested ? null : <span className="act-verb">{verb}</span>}
+        {detail ? <span className="act-detail">{detail}</span> : nested ? <span className="act-verb">{verb}</span> : null}
+        {childId ? (
+          <span
+            className="act-link"
+            role="link"
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              void inspectSubagent(childId);
+            }}
+          >
+            Open
+          </span>
+        ) : null}
         <span className="act-chev">{block.collapsed ? "▸" : "▾"}</span>
       </button>
       {block.collapsed ? null : media ? (
         <div className="act-body act-media">
           <ChatMedia src={media.path} alt={media.filename ?? ""} />
         </div>
-      ) : (
-        <pre className="act-body act-pre">
-          {body}
-          {clipped || block.truncated ? "\n…" : ""}
-        </pre>
-      )}
+      ) : output ? (
+        looksLikeMarkdown(output) ? (
+          <div className="act-body act-md">
+            <Markdown text={output} />
+            {clipped || block.truncated ? <div className="clamp-more">…</div> : null}
+          </div>
+        ) : (
+          <pre className="act-body act-pre">
+            {output}
+            {clipped || block.truncated ? "\n…" : ""}
+          </pre>
+        )
+      ) : null}
     </div>
   );
 });
+
+function looksLikeMarkdown(text: string): boolean {
+  if (text.length > 4000) return false;
+  if (text.trimStart().startsWith("{") || text.trimStart().startsWith("[")) return false;
+  return /(^|\n)#{1,6}\s|(^|\n)```|(^|\n)[-*]\s|(^|\n)\d+\.\s/.test(text);
+}
 
 function StatusDot({ status }: { status: "done" | "running" | "error" }) {
   return <span className={`act-dot ${status}`} />;

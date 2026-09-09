@@ -1,8 +1,35 @@
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { APP_AUTHOR, APP_DESCRIPTION, APP_NAME, APP_URL, APP_VERSION } from "../lib/app-info";
+import {
+  APP_AUTHOR,
+  APP_DESCRIPTION,
+  APP_DISCLAIMER,
+  APP_NAME,
+  APP_URL,
+  APP_VERSION,
+} from "../lib/app-info";
 import { MODES, useApp } from "../lib/store";
 import { normalizeCwd, projectName } from "../lib/format";
+import {
+  KAIJU_OPTIONS,
+  THEME_CHOICES,
+  kaijuForTheme,
+  type KaijuId,
+  type ThemePreference,
+} from "../lib/themes";
+import kaijuAnguirus from "../assets/themes/kaiju-anguirus.png";
+import kaijuGhidorah from "../assets/themes/kaiju-ghidorah.png";
+import kaijuGodzilla from "../assets/themes/kaiju-godzilla.png";
+import kaijuMecha from "../assets/themes/kaiju-mecha.png";
+import kaijuMothra from "../assets/themes/kaiju-mothra.png";
+
+const KAIJU_ART: Record<Exclude<KaijuId, "none">, string> = {
+  godzilla: kaijuGodzilla,
+  ghidorah: kaijuGhidorah,
+  mothra: kaijuMothra,
+  mecha: kaijuMecha,
+  anguirus: kaijuAnguirus,
+};
 import { desktop, useWorkspace, type GitInfo, type Settings } from "../lib/workspace";
 import { GrokLogo } from "./icons";
 
@@ -114,6 +141,8 @@ function SettingsDialog() {
   const settings = useWorkspace((s) => s.data.settings);
   const error = useWorkspace((s) => s.error);
   const models = useApp((s) => s.models);
+  const resolvedTheme = useApp((s) => s.theme);
+  const activeKaiju = kaijuForTheme(settings.kaiju, resolvedTheme);
 
   function patch(next: Partial<Settings>) {
     useWorkspace.getState().settings(next);
@@ -122,18 +151,53 @@ function SettingsDialog() {
     if (next.notifications) void Notification.requestPermission();
   }
 
+  function setKaiju(id: KaijuId) {
+    patch({ kaiju: { ...settings.kaiju, [resolvedTheme]: id } });
+  }
+
   return (
     <div className="modal-backdrop" onMouseDown={() => useWorkspace.setState({ settingsOpen: false })}>
       <div className="dialog settings-dialog" role="dialog" aria-label="Settings" onMouseDown={(event) => event.stopPropagation()}>
         <h2>Settings</h2>
-        <label>
-          Appearance
-          <select value={settings.theme} onChange={(event) => patch({ theme: event.target.value as Settings["theme"] })}>
-            <option value="system">System</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-          </select>
-        </label>
+        <div className="theme-field">
+          <span>Appearance</span>
+          <div className="theme-grid">
+            {THEME_CHOICES.map((choice) => (
+              <button
+                key={choice.id}
+                type="button"
+                className={`theme-swatch ${settings.theme === choice.id ? "on" : ""}`}
+                onClick={() => patch({ theme: choice.id as ThemePreference })}
+              >
+                <span className="theme-swatch-chip" style={{ background: choice.swatch }} />
+                {choice.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="theme-field">
+          <span>Kaiju for this theme</span>
+          <div className="theme-grid kaiju-grid">
+            {KAIJU_OPTIONS.map((choice) => (
+              <button
+                key={choice.id}
+                type="button"
+                className={`theme-swatch ${activeKaiju === choice.id ? "on" : ""}`}
+                onClick={() => setKaiju(choice.id)}
+              >
+                {choice.id === "none" ? (
+                  <span className="theme-swatch-chip kaiju-none">None</span>
+                ) : (
+                  <span
+                    className="theme-swatch-chip kaiju-art"
+                    style={{ backgroundImage: `url(${KAIJU_ART[choice.id]})` }}
+                  />
+                )}
+                {choice.label}
+              </button>
+            ))}
+          </div>
+        </div>
         <label>
           Grok CLI path
           <input
@@ -217,6 +281,7 @@ function AboutDialog() {
         </p>
         <p>{APP_DESCRIPTION}</p>
         {grokVersion ? <p className="muted">Grok Build {grokVersion}</p> : null}
+        <p className="about-disclaimer">{APP_DISCLAIMER}</p>
         <div className="dialog-actions">
           <a className="ghost" href={APP_URL} target="_blank" rel="noreferrer">
             GitHub

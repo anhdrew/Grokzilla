@@ -16,6 +16,22 @@ describe("workspace metadata", () => {
     expect(data.tasks).toEqual({});
   });
 
+  it("keeps a named theme and falls back on unknown ids", () => {
+    expect(normalizeWorkspace({ version: 1, settings: { theme: "kaiju" } }).settings.theme).toBe("kaiju");
+    expect(
+      normalizeWorkspace({ version: 1, settings: { theme: "neon" as never } }).settings.theme,
+    ).toBe("system");
+  });
+
+  it("keeps a per-theme kaiju choice", () => {
+    const data = normalizeWorkspace({
+      version: 1,
+      settings: { theme: "paper", kaiju: { paper: "mothra", dark: "nope" as never } },
+    });
+    expect(data.settings.kaiju.paper).toBe("mothra");
+    expect(data.settings.kaiju.dark).toBe("none");
+  });
+
   it("clamps concurrency and rejects unknown versions", () => {
     expect(normalizeWorkspace({ version: 1, settings: { concurrency: 99 } }).settings.concurrency).toBe(8);
     expect(normalizeWorkspace({ version: 1, settings: { concurrency: 0 } }).settings.concurrency).toBe(1);

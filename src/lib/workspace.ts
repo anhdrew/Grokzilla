@@ -2,13 +2,14 @@ import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import type { Attachment } from './types';
 import { loadArchive } from './archive';
+import { normalizeKaijuMap, normalizeThemeId, resolveTheme, type KaijuByTheme, type ThemeId, type ThemePreference } from './themes';
 
-export type Settings = { theme: 'system' | 'light' | 'dark'; grokPath: string; defaultModel: string; defaultMode: string; concurrency: number; shell: string; notifications: boolean };
+export type Settings = { theme: ThemePreference; kaiju: KaijuByTheme; grokPath: string; defaultModel: string; defaultMode: string; concurrency: number; shell: string; notifications: boolean };
 export type TaskMetadata = { title?: string; pinned?: boolean; order?: number; archived?: boolean; cwd?: string; repository?: string; branch?: string; base?: string; environment?: 'local' | 'worktree'; draft?: string; attachments?: Attachment[]; scrollTop?: number; model?: string; effort?: string; mode?: string };
 export type ScheduleRun = { at: number; status: 'queued' | 'completed' | 'failed' | 'skipped'; sessionId?: string; error?: string };
 export type Schedule = { id: string; name: string; cwd: string; prompt: string; everyMinutes: number; nextAt: number; enabled: boolean; runs: ScheduleRun[] };
 export type WorkspaceData = { version: 1; settings: Settings; tasks: Record<string, TaskMetadata>; projects: string[]; archivedProjects: string[]; selectedCwd: string | null; selectedSession: string | null; layout: { sidebar: number; right: number; terminal: number; rightOpen: boolean; terminalOpen: boolean }; schedules: Schedule[] };
-export const defaults: WorkspaceData = { version: 1, settings: { theme: 'system', grokPath: '', defaultModel: '', defaultMode: 'ask', concurrency: 3, shell: '/bin/zsh', notifications: true }, tasks: {}, projects: [], archivedProjects: [], selectedCwd: null, selectedSession: null, layout: { sidebar: 242, right: 460, terminal: 260, rightOpen: true, terminalOpen: false }, schedules: [] };
+export const defaults: WorkspaceData = { version: 1, settings: { theme: 'system', kaiju: {}, grokPath: '', defaultModel: '', defaultMode: 'ask', concurrency: 3, shell: '/bin/zsh', notifications: true }, tasks: {}, projects: [], archivedProjects: [], selectedCwd: null, selectedSession: null, layout: { sidebar: 242, right: 460, terminal: 260, rightOpen: true, terminalOpen: false }, schedules: [] };
 export function normalizeWorkspace(
   raw: Partial<Omit<WorkspaceData, "settings" | "layout">> & {
     version?: number;
@@ -20,6 +21,8 @@ export function normalizeWorkspace(
   const settings = { ...defaults.settings, ...raw.settings };
   const concurrency = Math.floor(Number(settings.concurrency));
   settings.concurrency = Number.isFinite(concurrency) ? Math.max(1, Math.min(8, concurrency)) : 3;
+  settings.theme = normalizeThemeId(settings.theme);
+  settings.kaiju = normalizeKaijuMap(settings.kaiju);
   return { ...defaults, ...raw, settings, layout: { ...defaults.layout, ...raw.layout } };
 }
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -95,4 +98,8 @@ export const desktop = {
   terminalResize: (id: string, cols: number, rows: number) => invoke<void>('terminal_resize', { id, cols, rows }),
   terminalClose: (id: string) => invoke<void>('terminal_close', { id }),
 };
-export function actualTheme(theme: Settings['theme']): 'light' | 'dark' { return theme === 'system' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : theme; }
+export function actualTheme(theme: Settings['theme']): ThemeId {
+  const preference = normalizeThemeId(theme);
+  const darkOs = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
+  return resolveTheme(preference, darkOs);
+}

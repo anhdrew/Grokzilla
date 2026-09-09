@@ -5,6 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Composer } from "./components/Composer";
 import { DesktopOverlays } from "./components/DesktopOverlays";
 import { PlanChip, PlanPanel } from "./components/PlanPanel";
+import { SubagentChip, SubagentInspector, SubagentRoster } from "./components/SubagentPanel";
 import { RightPanel } from "./components/RightPanel";
 import { Sidebar } from "./components/Sidebar";
 import { TerminalPanel } from "./components/TerminalPanel";
@@ -12,6 +13,7 @@ import { GrokLogo } from "./components/icons";
 import { TranscriptView } from "./components/Transcript";
 import { getExplorerDrag, hasExplorerDrag } from "./lib/explorer-drag";
 import { compactNumber, isReadOnlySession, projectName, previewJson } from "./lib/format";
+import { isDarkTheme, kaijuForTheme } from "./lib/themes";
 import { isPlanPermission } from "./lib/plan";
 import { EMPTY_QUEUE } from "./lib/runtime";
 import { useApp } from "./lib/store";
@@ -28,6 +30,7 @@ export default function App() {
   const bootstrap = useApp((s) => s.bootstrap);
   const login = useApp((s) => s.login);
   const layout = useWorkspace((s) => s.data.layout);
+  const kaiju = useWorkspace((s) => kaijuForTheme(s.data.settings.kaiju, theme));
 
   useEffect(() => {
     document.documentElement.dataset.theme = useApp.getState().theme;
@@ -56,6 +59,12 @@ export default function App() {
       unlistenControl?.();
     };
   }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    if (kaiju === "none") delete document.documentElement.dataset.kaiju;
+    else document.documentElement.dataset.kaiju = kaiju;
+  }, [theme, kaiju]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -112,12 +121,16 @@ export default function App() {
           return;
         }
         const state = useApp.getState();
+        if (state.inspectingSubagent) {
+          event.preventDefault();
+          state.closeSubagentInspector();
+          return;
+        }
         if (state.planPanelOpen || state.planReviewOpen) {
           event.preventDefault();
           state.closePlanPanel();
           return;
         }
-        void state.stop();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -173,7 +186,7 @@ export default function App() {
   }
 
   return (
-    <div className="app" data-theme={theme}>
+    <div className="app" data-theme={theme} {...(kaiju === "none" ? {} : { "data-kaiju": kaiju })}>
       <Titlebar />
       {bootError ? <div className="banner">{bootError}</div> : null}
       <div className="desktop">
@@ -329,6 +342,7 @@ function Titlebar() {
   const working = useApp((s) => {
     if (s.sending) return true;
     const thread = s.threads.find((item) => item.sessionId === s.selectedSession);
+    if ((thread?.runningSubagents ?? 0) > 0) return true;
     if (!thread) return false;
     if (!isReadOnlySession(s.selectedSession, s.threads, s.readOnlyIds)) return false;
     return thread.watchStatus === "running";
@@ -384,10 +398,10 @@ function Titlebar() {
         <button
           className="icon-btn"
           data-tauri-drag-region="false"
-          title={theme === "light" ? "Switch to dark" : "Switch to light"}
-          onClick={() => setTheme(theme === "light" ? "dark" : "light")}
+          title={isDarkTheme(theme) ? "Switch to light" : "Switch to dark"}
+          onClick={() => setTheme(isDarkTheme(theme) ? "light" : "dark")}
         >
-          {theme === "light" ? "☾" : "☀"}
+          {isDarkTheme(theme) ? "☀" : "☾"}
         </button>
         <button
           className="icon-btn"
@@ -575,9 +589,11 @@ function ChatPane() {
               </button>
             ) : null}
             <PlanChip />
+            <SubagentChip />
             <ThreadStatsBar />
           </div>
         </div>
+        <SubagentRoster />
       </div>
       <div className="transcript" ref={scroller}>
         <div className={`stack ${blocks?.length ? "has-turns" : ""}`}>
@@ -601,7 +617,7 @@ function ChatPane() {
               </div>
             </div>
           ) : (
-            <TranscriptView blocks={blocks} />
+            <TranscriptView blocks={blocks} sessionId={selectedSession} />
           )}
           <WorkingLine />
         </div>
@@ -652,6 +668,7 @@ function ChatPane() {
         <Composer />
       </div>
       <PlanPanel />
+      <SubagentInspector />
     </main>
   );
 }
@@ -660,15 +677,22 @@ function WorkingLine() {
   const working = useApp((s) => {
     if (s.sending) return true;
     const thread = s.threads.find((item) => item.sessionId === s.selectedSession);
+    if ((thread?.runningSubagents ?? 0) > 0) return true;
     if (!thread) return false;
     if (!isReadOnlySession(s.selectedSession, s.threads, s.readOnlyIds)) return false;
     return thread.watchStatus === "running";
+  });
+  const childNote = useApp((s) => {
+    const thread = s.threads.find((item) => item.sessionId === s.selectedSession);
+    const n = thread?.runningSubagents ?? 0;
+    if (n <= 0) return "";
+    return `${n} subagent${n === 1 ? "" : "s"} running`;
   });
   if (!working) return null;
   return (
     <div className="working-line" aria-live="polite">
       <span className="act-dot running" />
-      Working
+      {childNote || "Working"}
     </div>
   );
 }
