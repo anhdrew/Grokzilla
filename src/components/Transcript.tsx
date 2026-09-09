@@ -1,4 +1,4 @@
-import { createContext, memo, useContext, useMemo, useState } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   ASSISTANT_CLAMP,
   ASSISTANT_PREVIEW,
@@ -9,6 +9,9 @@ import {
   groupTranscript,
   isFailedToolStatus,
   isLiveToolStatus,
+  isQuietRailItem,
+  liveActivity,
+  railItemLive,
   railStepCount,
   railSummary,
   shouldClamp,
@@ -27,10 +30,69 @@ import { ChatMedia, Markdown } from "./Markdown";
 import { PlanChecklist } from "./PlanPanel";
 
 const TranscriptSession = createContext<string | null>(null);
+const EnterCtx = createContext<(id: string) => boolean>(() => false);
 
 function useTranscriptSession() {
   const override = useContext(TranscriptSession);
   return useApp((s) => override ?? s.inspectingSubagent ?? s.selectedSession);
+}
+
+function useEnterClass(id: string): string {
+  return useContext(EnterCtx)(id) ? "transcript-enter" : "";
+}
+
+function railItemKey(item: RailItem): string {
+  if (item.type === "verbRun") return item.id;
+  return item.block.id;
+}
+
+export function ActivityTicker({
+  sessionId,
+  sending,
+  runningSubagents = 0,
+  fallback,
+}: {
+  sessionId?: string | null;
+  sending: boolean;
+  runningSubagents?: number;
+  fallback?: string;
+}) {
+  const blocks = useApp((s) => {
+    const id = sessionId ?? s.selectedSession;
+    return id ? s.transcripts[id]?.blocks : undefined;
+  });
+  const activity = liveActivity(blocks, sending, runningSubagents);
+  const label = activity?.label || (sending ? fallback || "Working" : "");
+  const [shown, setShown] = useState(label);
+  const [leaving, setLeaving] = useState(false);
+  const shownRef = useRef(shown);
+  shownRef.current = shown;
+
+  useEffect(() => {
+    if (label) {
+      setShown(label);
+      setLeaving(false);
+      return;
+    }
+    if (!shownRef.current) return;
+    setLeaving(true);
+    const timer = window.setTimeout(() => {
+      setShown("");
+      setLeaving(false);
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [label]);
+
+  const text = label || shown;
+  if (!text) return null;
+  return (
+    <div className={`working-line ${leaving ? "is-leaving" : ""}`} aria-live="polite">
+      <span className="act-dot running" />
+      <span key={text} className="working-copy">
+        {text}
+      </span>
+    </div>
+  );
 }
 
 export const TranscriptView = memo(function TranscriptView({
@@ -46,14 +108,49 @@ export const TranscriptView = memo(function TranscriptView({
     () => groupTranscript(blocks, sending, tailId),
     [blocks, sending, tailId],
   );
+  const seenRef = useRef(new Set<string>());
+  const animateRef = useRef(new Set<string>());
+  const sessionRef = useRef<string | null>(null);
+  const sendingRef = useRef(sending);
+  sendingRef.current = sending;
+
+  if (sessionRef.current !== (sessionId ?? "")) {
+    sessionRef.current = sessionId ?? "";
+    const primed = new Set<string>();
+    for (const group of groups) {
+      if (group.type === "rail") {
+        primed.add(group.id);
+        for (const item of group.items) primed.add(railItemKey(item));
+      } else {
+        primed.add(group.block.id);
+      }
+    }
+    seenRef.current = primed;
+    animateRef.current = new Set();
+  }
+
+  const markEnter = useCallback((id: string) => {
+    if (!id) return false;
+    if (animateRef.current.has(id)) return true;
+    if (seenRef.current.has(id)) return false;
+    seenRef.current.add(id);
+    if (sendingRef.current) {
+      animateRef.current.add(id);
+      return true;
+    }
+    return false;
+  }, []);
+
   return (
     <TranscriptSession.Provider value={sessionId ?? null}>
-      {groups.map((group, index) => {
-        if (group.type === "rail") {
-          return <ActivityRail key={group.id || index} items={group.items} />;
-        }
-        return <MessageBlock key={group.block.id} block={group.block} />;
-      })}
+      <EnterCtx.Provider value={markEnter}>
+        {groups.map((group, index) => {
+          if (group.type === "rail") {
+            return <ActivityRail key={group.id || index} items={group.items} />;
+          }
+          return <MessageBlock key={group.block.id} block={group.block} />;
+        })}
+      </EnterCtx.Provider>
     </TranscriptSession.Provider>
   );
 });
@@ -75,15 +172,18 @@ const ActivityRail = memo(function ActivityRail({ items }: { items: RailItem[] }
   const summary = useMemo(() => railSummary(items), [items]);
   const shown = open ? items : live;
   const foldable = items.length > 1 || items[0]?.type === "verbRun";
+  const enter = useEnterClass(items[0] ? railItemKey(items[0]) : "");
   if (!foldable) {
+    const item = items[0]!;
+    if (!open && railItemLive(item, sending, tailId) && isQuietRailItem(item)) return null;
     return (
-      <div className="activity">
-        <RailItemRow item={items[0]!} />
+      <div className={`activity ${enter}`}>
+        <RailItemRow item={item} />
       </div>
     );
   }
   return (
-    <div className={`activity ${open ? "" : "folded"}`}>
+    <div className={`activity ${open ? "" : "folded"} ${enter}`}>
       <button className="act activity-toggle" onClick={() => setOpen((value) => !value)}>
         <span className="act-verb">{steps} steps</span>
         <span className="act-detail">{summary}</span>
@@ -96,11 +196,6 @@ const ActivityRail = memo(function ActivityRail({ items }: { items: RailItem[] }
   );
 });
 
-function railItemKey(item: RailItem): string {
-  if (item.type === "verbRun") return item.id;
-  return item.block.id;
-}
-
 function RailItemRow({ item }: { item: RailItem }) {
   if (item.type === "thought") return <ThoughtRow block={item.block} />;
   if (item.type === "verbRun") return <VerbRunRow verb={item.verb} tools={item.tools} />;
@@ -108,9 +203,10 @@ function RailItemRow({ item }: { item: RailItem }) {
 }
 
 const MessageBlock = memo(function MessageBlock({ block }: { block: TranscriptBlock }) {
+  const enter = useEnterClass(block.id);
   if (block.type === "user") {
     return (
-      <article className="turn turn-user">
+      <article className={`turn turn-user ${enter}`}>
         <div className="bubble-user">
           <ClampedMarkdown text={block.text} limits={USER_CLAMP} preview={USER_CLAMP} />
         </div>
@@ -119,7 +215,7 @@ const MessageBlock = memo(function MessageBlock({ block }: { block: TranscriptBl
   }
   if (block.type === "assistant") {
     return (
-      <article className="turn turn-asst">
+      <article className={`turn turn-asst ${enter}`}>
         <ClampedMarkdown text={block.text} limits={ASSISTANT_CLAMP} preview={ASSISTANT_PREVIEW} liveTail />
       </article>
     );
@@ -127,7 +223,7 @@ const MessageBlock = memo(function MessageBlock({ block }: { block: TranscriptBl
   if (block.type === "plan") {
     const entries = planEntries(block.entries);
     return (
-      <div className="plan">
+      <div className={`plan ${enter}`}>
         <div className="plan-kicker">Plan</div>
         {entries.length ? (
           <PlanChecklist entries={entries} />
@@ -181,6 +277,7 @@ const ThoughtRow = memo(function ThoughtRow({ block }: { block: Extract<Transcri
   const toggle = useApp((s) => s.toggle);
   const sending = useApp((s) => s.sending);
   const sessionId = useTranscriptSession();
+  const enter = useEnterClass(block.id);
   const tail = useApp((s) => {
     const id = sessionId;
     const blocks = id ? s.transcripts[id]?.blocks : undefined;
@@ -189,7 +286,7 @@ const ThoughtRow = memo(function ThoughtRow({ block }: { block: Extract<Transcri
   const preview = block.text.trim().split(/\n/)[0] ?? "";
   const live = !block.collapsed || (sending && tail);
   return (
-    <div className="act-wrap">
+    <div className={`act-wrap ${enter}`}>
       <button className="act think-act" onClick={() => toggle(block.id)}>
         <StatusDot status={live ? "running" : "done"} />
         <span className="act-verb">Thought</span>
@@ -207,8 +304,9 @@ const VerbRunRow = memo(function VerbRunRow({ verb, tools }: { verb: string; too
   const failed = tools.some((tool) => isFailedToolStatus(tool.status));
   const status = failed ? "error" : live ? "running" : "done";
   const detail = verbRunDetail(tools);
+  const enter = useEnterClass(tools[0] ? `run-${tools[0].id}` : verb);
   return (
-    <div className={`verb-run ${open ? "is-open" : ""}`}>
+    <div className={`verb-run ${open ? "is-open" : ""} ${enter}`}>
       <button className="act" onClick={() => setOpen((value) => !value)}>
         <StatusDot status={status} />
         <span className="act-verb">{verb}</span>
@@ -238,6 +336,7 @@ const ToolRow = memo(function ToolRow({ block, nested = false }: { block: ToolBl
   const running = isLiveToolStatus(block.status);
   const failed = isFailedToolStatus(block.status);
   const status = failed ? "error" : running ? "running" : "done";
+  const enter = useEnterClass(block.id);
   const media = toolMedia(block.output, block.content);
   const raw = toolBodyText(block);
   const clipped = raw.length > TOOL_BODY_CAP;
@@ -251,7 +350,7 @@ const ToolRow = memo(function ToolRow({ block, nested = false }: { block: ToolBl
     else toggle(block.id);
   }
   return (
-    <div className={`act-wrap ${nested ? "nested" : ""}`}>
+    <div className={`act-wrap ${nested ? "nested" : ""} ${enter}`}>
       <button className="act" onClick={onToggle}>
         <StatusDot status={status} />
         {nested ? null : <span className="act-verb">{verb}</span>}

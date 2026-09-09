@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  activityGerund,
   clampText,
   editDiffstat,
   foldedRailItems,
   groupTranscript,
   isQuietVerb,
+  liveActivity,
   railStepCount,
   railSummary,
   shouldClamp,
@@ -78,7 +80,7 @@ describe("groupTranscript", () => {
     expect(rail.items.map((item) => item.type)).toEqual(["tool", "thought", "tool"]);
   });
 
-  it("keeps a live tool visible when the rail is folded", () => {
+  it("keeps a live loud tool visible when the rail is folded", () => {
     const groups = groupTranscript([
       tool("r1", "read_file"),
       tool("r2", "read_file"),
@@ -89,6 +91,92 @@ describe("groupTranscript", () => {
     const folded = foldedRailItems(rail.items);
     expect(folded).toHaveLength(1);
     expect(folded[0]).toMatchObject({ type: "tool" });
+  });
+
+  it("hides a live quiet read when the rail is folded", () => {
+    const groups = groupTranscript([
+      tool("r1", "read_file"),
+      tool("r2", "read_file", { status: "in_progress" }),
+    ]);
+    const rail = groups[0];
+    if (rail.type !== "rail") throw new Error("expected rail");
+    expect(foldedRailItems(rail.items)).toEqual([]);
+  });
+});
+
+describe("liveActivity", () => {
+  it("names a live read with its path", () => {
+    expect(
+      liveActivity(
+        [tool("r1", "read_file", { kind: "read", status: "in_progress", input: { target_file: "/tmp/foo/a.ts" } })],
+        true,
+      ),
+    ).toMatchObject({ gerund: "Reading", detail: "foo/a.ts", label: "Reading foo/a.ts" });
+  });
+
+  it("names a live write", () => {
+    expect(
+      liveActivity(
+        [tool("w1", "write", { status: "in_progress", input: { path: "/tmp/out.rs" } })],
+        true,
+      ),
+    ).toMatchObject({ gerund: "Writing", label: "Writing tmp/out.rs" });
+  });
+
+  it("names a live edit", () => {
+    expect(
+      liveActivity(
+        [tool("e1", "search_replace", { kind: "edit", status: "in_progress", input: { path: "src/App.tsx" } })],
+        true,
+      ),
+    ).toMatchObject({ gerund: "Editing", label: "Editing src/App.tsx" });
+  });
+
+  it("names thinking when the tail thought is live", () => {
+    expect(liveActivity([thought("t0", "hmm")], true)).toEqual({
+      gerund: "Thinking",
+      detail: "",
+      label: "Thinking",
+    });
+  });
+
+  it("returns Working when sending with no live tool", () => {
+    expect(liveActivity([tool("r1", "read_file")], true)).toEqual({
+      gerund: "Working",
+      detail: "",
+      label: "Working",
+    });
+  });
+
+  it("returns null when idle", () => {
+    expect(liveActivity([tool("r1", "read_file")], false)).toBeNull();
+  });
+
+  it("prefers a live tool over the subagent count", () => {
+    expect(
+      liveActivity(
+        [tool("r1", "read_file", { status: "in_progress", input: { target_file: "a.ts" } })],
+        true,
+        2,
+      ),
+    ).toMatchObject({ gerund: "Reading", label: "Reading a.ts" });
+  });
+
+  it("names running subagents when nothing else is live", () => {
+    expect(liveActivity([tool("r1", "read_file")], false, 2)).toEqual({
+      gerund: "Working",
+      detail: "2 subagents running",
+      label: "2 subagents running",
+    });
+  });
+});
+
+describe("activityGerund", () => {
+  it("maps verbs to gerunds and leaves unknown labels alone", () => {
+    expect(activityGerund("Read")).toBe("Reading");
+    expect(activityGerund("Run")).toBe("Running");
+    expect(activityGerund("Blender")).toBe("Blender");
+    expect(activityGerund("Step")).toBe("Working");
   });
 });
 

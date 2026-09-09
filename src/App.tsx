@@ -10,7 +10,7 @@ import { RightPanel } from "./components/RightPanel";
 import { Sidebar } from "./components/Sidebar";
 import { TerminalPanel } from "./components/TerminalPanel";
 import { GrokLogo } from "./components/icons";
-import { TranscriptView } from "./components/Transcript";
+import { ActivityTicker, TranscriptView } from "./components/Transcript";
 import { getExplorerDrag, hasExplorerDrag } from "./lib/explorer-drag";
 import { compactNumber, isReadOnlySession, projectName, previewJson } from "./lib/format";
 import { isDarkTheme, kaijuForTheme } from "./lib/themes";
@@ -574,98 +574,100 @@ function ChatPane() {
 
   return (
     <main className="chat" onDragOver={onChatDragOver} onDrop={onChatDrop}>
-      <div className="chat-head">
-        <div className="chat-head-main">
-          <h1>{blocks?.length ? title : projectName(selectedCwd)}</h1>
-          <div className="chat-head-meta">
-            {selectedSession ? (
-              <button
-                type="button"
-                className="pill session-id-pill"
-                title={`${selectedSession} — click to copy`}
-                onClick={() => void navigator.clipboard.writeText(selectedSession)}
-              >
-                {selectedSession.slice(0, 8)}
-              </button>
-            ) : null}
-            <PlanChip />
-            <SubagentChip />
-            <ThreadStatsBar />
+      <div className="chat-col">
+        <div className="chat-head">
+          <div className="chat-head-main">
+            <h1>{blocks?.length ? title : projectName(selectedCwd)}</h1>
+            <div className="chat-head-meta">
+              {selectedSession ? (
+                <button
+                  type="button"
+                  className="pill session-id-pill"
+                  title={`${selectedSession} — click to copy`}
+                  onClick={() => void navigator.clipboard.writeText(selectedSession)}
+                >
+                  {selectedSession.slice(0, 8)}
+                </button>
+              ) : null}
+              <PlanChip />
+              <SubagentChip />
+              <ThreadStatsBar />
+            </div>
+          </div>
+          <SubagentRoster />
+        </div>
+        <div className="transcript" ref={scroller}>
+          <div className={`stack ${blocks?.length ? "has-turns" : ""}`}>
+            {!blocks?.length ? (
+              <div className="empty">
+                <div className="empty-card">
+                  <h2>
+                    {isHeadless
+                      ? "Watching grok -p"
+                      : readOnly
+                        ? "Read-only session"
+                        : "What should we work on?"}
+                  </h2>
+                  <p>
+                    {isHeadless
+                      ? "Status and results show up as the headless run writes them. Grokzilla will not attach to this session."
+                      : readOnly
+                        ? "This transcript is loaded from disk. Grokzilla will not attach, so a live TUI or grok -p run stays untouched."
+                        : "Ask Grok to explore the repo, fix a bug, or plan a change. Approvals stay in Ask mode unless you switch."}
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <TranscriptView blocks={blocks} sessionId={selectedSession} />
+            )}
+            <WorkingLine />
           </div>
         </div>
-        <SubagentRoster />
-      </div>
-      <div className="transcript" ref={scroller}>
-        <div className={`stack ${blocks?.length ? "has-turns" : ""}`}>
-          {!blocks?.length ? (
-            <div className="empty">
-              <div className="empty-card">
-                <h2>
-                  {isHeadless
-                    ? "Watching grok -p"
-                    : readOnly
-                      ? "Read-only session"
-                      : "What should we work on?"}
-                </h2>
-                <p>
-                  {isHeadless
-                    ? "Status and results show up as the headless run writes them. Grokzilla will not attach to this session."
-                    : readOnly
-                      ? "This transcript is loaded from disk. Grokzilla will not attach, so a live TUI or grok -p run stays untouched."
-                      : "Ask Grok to explore the repo, fix a bug, or plan a change. Approvals stay in Ask mode unless you switch."}
-                </p>
+        {!stuck ? (
+          <button
+            className="jump-bottom"
+            onClick={() => {
+              stick.current = true;
+              setStuck(true);
+              const el = scroller.current;
+              if (el) el.scrollTop = el.scrollHeight;
+            }}
+          >
+            Jump to latest
+          </button>
+        ) : null}
+        <div className="composer-wrap">
+          {taskError ? <div className="banner">{taskError}</div> : null}
+          {queue.length > 0 ? (
+            <div className="queue-banner">
+              {queue.length} prompt{queue.length === 1 ? "" : "s"} waiting
+              <button className="ghost" onClick={() => selectedSession && useApp.getState().clearQueue(selectedSession)}>
+                Clear queue
+              </button>
+            </div>
+          ) : null}
+          {permission && !readOnly && !isPlanPermission(permission) ? (
+            <div className="permission">
+              <h3>{permission.title || "Permission required"}</h3>
+              <p>{previewJson(permission.toolCall ?? permission.raw, 400)}</p>
+              <div className="perm-actions">
+                {permission.options.map((option) => (
+                  <button
+                    key={option.optionId}
+                    className={option.kind?.includes("reject") ? "danger" : "primary"}
+                    onClick={() => void answerPermission(option.optionId)}
+                  >
+                    {option.name}
+                  </button>
+                ))}
+                <button className="ghost" onClick={() => void answerPermission(undefined, true)}>
+                  Cancel
+                </button>
               </div>
             </div>
-          ) : (
-            <TranscriptView blocks={blocks} sessionId={selectedSession} />
-          )}
-          <WorkingLine />
+          ) : null}
+          <Composer />
         </div>
-      </div>
-      {!stuck ? (
-        <button
-          className="jump-bottom"
-          onClick={() => {
-            stick.current = true;
-            setStuck(true);
-            const el = scroller.current;
-            if (el) el.scrollTop = el.scrollHeight;
-          }}
-        >
-          Jump to latest
-        </button>
-      ) : null}
-      <div className="composer-wrap">
-        {taskError ? <div className="banner">{taskError}</div> : null}
-        {queue.length > 0 ? (
-          <div className="queue-banner">
-            {queue.length} prompt{queue.length === 1 ? "" : "s"} waiting
-            <button className="ghost" onClick={() => selectedSession && useApp.getState().clearQueue(selectedSession)}>
-              Clear queue
-            </button>
-          </div>
-        ) : null}
-        {permission && !readOnly && !isPlanPermission(permission) ? (
-          <div className="permission">
-            <h3>{permission.title || "Permission required"}</h3>
-            <p>{previewJson(permission.toolCall ?? permission.raw, 400)}</p>
-            <div className="perm-actions">
-              {permission.options.map((option) => (
-                <button
-                  key={option.optionId}
-                  className={option.kind?.includes("reject") ? "danger" : "primary"}
-                  onClick={() => void answerPermission(option.optionId)}
-                >
-                  {option.name}
-                </button>
-              ))}
-              <button className="ghost" onClick={() => void answerPermission(undefined, true)}>
-                Cancel
-              </button>
-            </div>
-          </div>
-        ) : null}
-        <Composer />
       </div>
       <PlanPanel />
       <SubagentInspector />
@@ -674,7 +676,8 @@ function ChatPane() {
 }
 
 function WorkingLine() {
-  const working = useApp((s) => {
+  const sessionId = useApp((s) => s.selectedSession);
+  const sending = useApp((s) => {
     if (s.sending) return true;
     const thread = s.threads.find((item) => item.sessionId === s.selectedSession);
     if ((thread?.runningSubagents ?? 0) > 0) return true;
@@ -682,18 +685,12 @@ function WorkingLine() {
     if (!isReadOnlySession(s.selectedSession, s.threads, s.readOnlyIds)) return false;
     return thread.watchStatus === "running";
   });
-  const childNote = useApp((s) => {
+  const runningSubagents = useApp((s) => {
     const thread = s.threads.find((item) => item.sessionId === s.selectedSession);
-    const n = thread?.runningSubagents ?? 0;
-    if (n <= 0) return "";
-    return `${n} subagent${n === 1 ? "" : "s"} running`;
+    return thread?.runningSubagents ?? 0;
   });
-  if (!working) return null;
   return (
-    <div className="working-line" aria-live="polite">
-      <span className="act-dot running" />
-      {childNote || "Working"}
-    </div>
+    <ActivityTicker sessionId={sessionId} sending={sending} runningSubagents={runningSubagents} />
   );
 }
 

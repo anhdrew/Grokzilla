@@ -33,6 +33,73 @@ export function isQuietVerb(verb: string): boolean {
   return QUIET_VERBS.has(verb);
 }
 
+const GERUNDS: Record<string, string> = {
+  Read: "Reading",
+  Write: "Writing",
+  Edit: "Editing",
+  Search: "Searching",
+  List: "Listing",
+  Fetch: "Fetching",
+  Run: "Running",
+  Thought: "Thinking",
+  Think: "Thinking",
+  Subagent: "Starting subagent",
+  Wait: "Waiting",
+  Stop: "Stopping",
+  Delete: "Deleting",
+  Move: "Moving",
+};
+
+export type LiveActivity = {
+  gerund: string;
+  detail: string;
+  label: string;
+};
+
+export function activityGerund(verb: string): string {
+  if (!verb || verb === "Step") return "Working";
+  return GERUNDS[verb] ?? verb;
+}
+
+function joinActivityLabel(gerund: string, detail: string): string {
+  return detail ? `${gerund} ${detail}` : gerund;
+}
+
+export function liveActivity(
+  blocks: TranscriptBlock[] | undefined,
+  sending = false,
+  runningSubagents = 0,
+): LiveActivity | null {
+  const tailId = blocks?.length ? blocks[blocks.length - 1]!.id : null;
+  if (blocks) {
+    for (let i = blocks.length - 1; i >= 0; i -= 1) {
+      const block = blocks[i]!;
+      if (block.type === "tool" && isLiveToolStatus(block.status)) {
+        const verb = toolVerb(block.kind, block.title);
+        const gerund = activityGerund(verb);
+        const detail = toolRowDetail(block);
+        return { gerund, detail, label: joinActivityLabel(gerund, detail) };
+      }
+      if (block.type === "thinking" && isLiveActivityBlock(block, sending, tailId)) {
+        return { gerund: "Thinking", detail: "", label: "Thinking" };
+      }
+    }
+  }
+  if (runningSubagents > 0) {
+    const detail = `${runningSubagents} subagent${runningSubagents === 1 ? "" : "s"} running`;
+    return { gerund: "Working", detail, label: detail };
+  }
+  if (sending) return { gerund: "Working", detail: "", label: "Working" };
+  return null;
+}
+
+export function isQuietRailItem(item: RailItem): boolean {
+  if (item.type === "thought") return true;
+  if (item.type === "verbRun") return isQuietVerb(item.verb);
+  if (isSubagentTool(item.block.title)) return false;
+  return isQuietVerb(toolVerb(item.block.kind, item.block.title));
+}
+
 export function isLiveToolStatus(status?: string): boolean {
   return /pend|run|in_progress|progress/i.test(status ?? "");
 }
@@ -164,7 +231,7 @@ export function railSummary(items: RailItem[]): string {
 }
 
 export function foldedRailItems(items: RailItem[], sending = false, tailId?: string | null): RailItem[] {
-  return items.filter((item) => railItemLive(item, sending, tailId));
+  return items.filter((item) => railItemLive(item, sending, tailId) && !isQuietRailItem(item));
 }
 
 export function editDiffstat(block: Pick<ToolBlock, "input" | "output" | "content" | "title">): {

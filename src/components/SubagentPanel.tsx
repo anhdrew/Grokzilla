@@ -10,7 +10,7 @@ import {
 import { isRunning } from "../lib/runtime";
 import { useApp } from "../lib/store";
 import type { SubagentInfo } from "../lib/types";
-import { TranscriptView } from "./Transcript";
+import { ActivityTicker, TranscriptView } from "./Transcript";
 
 const EMPTY: SubagentInfo[] = [];
 
@@ -216,12 +216,11 @@ export function SubagentInspector() {
           {blocks?.length ? (
             <div className="stack has-turns">
               <TranscriptView blocks={blocks} sessionId={childId} />
-              {live ? (
-                <div className="working-line">
-                  <span className="act-dot running" />
-                  {item?.activity || "Working"}
-                </div>
-              ) : null}
+              <ActivityTicker
+                sessionId={childId}
+                sending={live}
+                fallback={item?.activity || "Working"}
+              />
             </div>
           ) : (
             <p className="muted panel-status">{live ? "Waiting for the first child update…" : "No child transcript yet."}</p>
