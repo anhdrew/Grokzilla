@@ -2,6 +2,8 @@
 
 Desktop GUI for [Grok Build CLI](https://docs.x.ai/build/overview). Same agent, same sessions, a window instead of the TUI.
 
+![Grokzilla main window](docs/screenshots/01-main.png)
+
 macOS only. Grokzilla does **not** reimplement the model or tool loop. It spawns `grok agent stdio` and speaks [ACP](https://agentclientprotocol.com).
 
 ## Install
@@ -48,6 +50,10 @@ pnpm tauri dev
 Shortcuts: `Cmd+N` new thread, `Cmd+J` review pane, `Enter` send. Hover a thread and click the terminal icon to resume it in Terminal (`grok --resume`). Use **New**, **Plan**, and **Compact** in the chat header for those actions. Slash in the composer is for skills.
 
 Headless `grok -p` sessions show in the sidebar with a `-p` badge. Grokzilla hydrates them from disk and will not `session/load` them. Subagent children of those runs are hidden so they cannot be stolen from a live parent.
+
+Settings cover appearance palettes, optional kaiju watermarks, the Grok CLI path, default model/mode, and desktop notifications:
+
+![Grokzilla settings](docs/screenshots/02-settings.png)
 
 ## Architecture
 
