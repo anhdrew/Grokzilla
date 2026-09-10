@@ -83,8 +83,10 @@ function controlStatus() {
     watchStatus: thread?.watchStatus ?? null,
     permission: permission
       ? { title: permission.title ?? "Permission required", options: permission.options.map((o) => o.optionId) }
-      : null,
-    needs: sessionNeeds(transcript, thread, permission, isReadOnlySession(id, s.threads, s.readOnlyIds)).summary,
+      : s.planApproval
+        ? { title: "Approve plan and start building", options: ["allow", "deny"] }
+        : null,
+    needs: sessionNeeds(transcript, thread, permission, isReadOnlySession(id, s.threads, s.readOnlyIds), Boolean(s.planApproval)).summary,
   };
 }
 
@@ -132,6 +134,15 @@ async function controlSend(text: string, sessionId: string) {
 }
 
 async function controlPermission(action: string, optionId: string) {
+  if (useApp.getState().planApproval) {
+    const act = action.toLowerCase();
+    if (act === "deny" || act === "cancel" || act === "reject") {
+      await useApp.getState().revisePlan();
+      return { answered: "deny" };
+    }
+    await useApp.getState().approvePlan();
+    return { answered: "allow" };
+  }
   const permission = useApp.getState().permission;
   if (!permission) throw new Error("no permission is waiting");
   const act = action.toLowerCase();
@@ -164,5 +175,5 @@ async function controlTranscript(sessionId: string): Promise<TranscriptView> {
   }
   const permission = s.selectedSession === id ? s.permission : null;
   const readOnly = isReadOnlySession(id, s.threads, s.readOnlyIds) || Boolean(thread.headless);
-  return buildTranscriptView(id, thread, transcript, permission, readOnly);
+  return buildTranscriptView(id, thread, transcript, permission, readOnly, Boolean(s.planApproval && s.selectedSession === id));
 }

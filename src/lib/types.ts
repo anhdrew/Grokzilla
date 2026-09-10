@@ -16,6 +16,16 @@ export type PermissionRequest = {
   raw: Record<string, unknown>;
 };
 
+export type PlanApprovalRequest = {
+  processId?: number;
+  id: number;
+  sessionId: string;
+  toolCallId?: string;
+  planContent?: string;
+};
+
+export type PlanApprovalOutcome = "approved" | "cancelled" | "abandoned";
+
 export type PlanDoc = {
   path: string;
   markdown: string;

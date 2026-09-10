@@ -36,6 +36,7 @@ import type {
   GrokStatus,
   ModelInfo,
   PermissionRequest,
+  PlanApprovalRequest,
   PlanDoc,
   ProjectInfo,
   SessionUpdate,
@@ -86,6 +87,7 @@ type AppState = {
   sending: boolean;
   ignoringReplay: boolean;
   permission: PermissionRequest | null;
+  planApproval: PlanApprovalRequest | null;
   explorerOpen: boolean;
   mcpNote?: string;
   slashOpen: boolean;
@@ -187,7 +189,7 @@ function cancelFrame() {
 }
 
 function isUrgentEvent(event: AcpEvent) {
-  return event.kind === "exit" || event.kind === "permission";
+  return event.kind === "exit" || event.kind === "permission" || event.kind === "plan_approval";
 }
 
 function pruneTranscripts(
@@ -253,9 +255,37 @@ function flushStreamEvents(events: AcpEvent[], get: () => AppState, set: (partia
 function projection(t: TaskRuntime) {
   return { composer: t.draft, attachments: t.attachments, sending: isRunning(t), permission: t.permissions[0] ?? null,
     models: t.models, currentModel: t.currentModel, efforts: t.efforts, currentEffort: t.currentEffort,
-    planDoc: t.planDoc, planPanelOpen: t.planPanelOpen, planReviewOpen: t.planReviewOpen };
+    planDoc: t.planDoc, planPanelOpen: t.planPanelOpen, planReviewOpen: t.planReviewOpen, planApproval: t.planApproval ?? null };
 }
-const taskFields = { composer: 'draft', attachments: 'attachments', models: 'models', currentModel: 'currentModel', efforts: 'efforts', currentEffort: 'currentEffort', planDoc: 'planDoc', planPanelOpen: 'planPanelOpen', planReviewOpen: 'planReviewOpen' } as const;
+const taskFields = { composer: 'draft', attachments: 'attachments', models: 'models', currentModel: 'currentModel', efforts: 'efforts', currentEffort: 'currentEffort', planDoc: 'planDoc', planPanelOpen: 'planPanelOpen', planReviewOpen: 'planReviewOpen', planApproval: 'planApproval' } as const;
+
+const IMPLEMENT_PLAN = "The user approved the plan. Implement the plan in plan.md.";
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+async function answerExitPlan(
+  get: () => AppState,
+  outcome: "approved" | "cancelled" | "abandoned",
+  feedback?: string,
+) {
+  const pending = get().planApproval;
+  if (!pending || pending.processId == null) return false;
+  await api.respondPlanApproval(pending.sessionId, pending.processId, pending.id, outcome, feedback);
+  const task = get().tasks[pending.sessionId];
+  if (task && task.processId === pending.processId) {
+    get().updateTask(pending.sessionId, {
+      planApproval: undefined,
+      status: "running",
+      planReviewOpen: outcome === "cancelled",
+      ...(outcome === "abandoned" ? { planPanelOpen: false } : {}),
+    });
+  }
+  return true;
+}
 
 async function queuePrompt(
   get: () => AppState,
@@ -358,7 +388,7 @@ export const useApp = create<AppState>((baseSet, get) => {
         window.dispatchEvent(new CustomEvent('task-notification', { detail: { id, title: 'Task failed', body: String(e) } }));
       }
     } finally {
-      get().updateTask(id, { loading: false, processId: undefined, permissions: [] });
+      get().updateTask(id, { loading: false, processId: undefined, permissions: [], planApproval: undefined });
       await desktop.closeTask(id).catch(() => {});
       void get().refreshLists().catch(() => {});
       if (get().selectedSession === id) { void get().loadThreadStats(); void get().loadPlanDoc(); }
@@ -380,6 +410,7 @@ export const useApp = create<AppState>((baseSet, get) => {
   sending: false,
   ignoringReplay: false,
   permission: null,
+  planApproval: null,
   explorerOpen: true,
   slashOpen: false,
   attachments: [],
@@ -471,7 +502,31 @@ export const useApp = create<AppState>((baseSet, get) => {
     if (!acceptsEvent(task, event.processId)) return;
     if (isUrgentEvent(event)) { cancelFrame(); flushStreamEvents(pendingEvents.splice(0), get, set); }
     if (event.kind === 'exit') {
-      get().updateTask(id, { status: 'interrupted', processId: undefined, loading: false, permissions: [], error: 'Agent disconnected. History is preserved; the last prompt was not resent.' });
+      get().updateTask(id, { status: 'interrupted', processId: undefined, loading: false, permissions: [], planApproval: undefined, error: 'Agent disconnected. History is preserved; the last prompt was not resent.' });
+      return;
+    }
+    if (event.kind === 'plan_approval' && event.id != null) {
+      const raw = asRecord(event.payload) ?? {};
+      const planContent =
+        (typeof raw.planContent === "string" && raw.planContent) ||
+        (typeof raw.plan_content === "string" && raw.plan_content) ||
+        undefined;
+      const toolCallId =
+        (typeof raw.toolCallId === "string" && raw.toolCallId) ||
+        (typeof raw.tool_call_id === "string" && raw.tool_call_id) ||
+        undefined;
+      const planDoc = planContent?.trim()
+        ? { path: task?.planDoc?.path ?? get().planDoc?.path ?? "plan.md", markdown: planContent, exists: true }
+        : undefined;
+      get().updateTask(id, {
+        status: "needs-input",
+        planApproval: { id: event.id, processId: event.processId, sessionId: id, toolCallId, planContent },
+        planPanelOpen: true,
+        planReviewOpen: true,
+        ...(planDoc ? { planDoc } : {}),
+      });
+      if (id === get().selectedSession) void get().loadPlanDoc();
+      window.dispatchEvent(new CustomEvent("task-notification", { detail: { id, title: "Plan ready", body: "Approve the plan to start building." } }));
       return;
     }
     if (event.kind === 'permission' && event.id != null) {
@@ -663,7 +718,7 @@ export const useApp = create<AppState>((baseSet, get) => {
 
   stop: async () => {
     const id = get().selectedSession; if (!id) return;
-    get().updateTask(id, { status: 'interrupted', queue: [], permissions: [], error: 'Stopped by you.' });
+    get().updateTask(id, { status: 'interrupted', queue: [], permissions: [], planApproval: undefined, error: 'Stopped by you.' });
     await api.cancelPrompt(id).catch(() => {});
     await desktop.closeTask(id).catch(() => {});
     get().updateTask(id, { processId: undefined, loading: false });
@@ -910,33 +965,61 @@ export const useApp = create<AppState>((baseSet, get) => {
   },
 
   approvePlan: async (comments = [], notes) => {
+    const text = formatPlanFeedback(comments, notes);
+    if (await answerExitPlan(get, "approved", text || undefined)) {
+      set({ planReviewOpen: false, planPanelOpen: true, planDirty: false });
+      void get().loadPlanDoc();
+      return;
+    }
     const permission = get().permission;
     if (permission && isPlanPermission(permission)) {
       const allow = preferAllowOption(permission.options);
       await get().answerPermission(allow?.optionId);
+      set({ planReviewOpen: false, planPanelOpen: true, planDirty: false });
+      void get().loadPlanDoc();
+      if (text) {
+        set({ composer: text });
+        await get().send();
+      }
+      return;
     }
-    const text = formatPlanFeedback(comments, notes);
-    set({ planReviewOpen: false, planPanelOpen: true, planDirty: false });
-    void get().loadPlanDoc();
-    if (text) {
-      set({ composer: text });
-      await get().send();
+    const id = get().selectedSession;
+    if (id) {
+      const current = get().transcripts[id] ?? emptyTranscript();
+      set({ transcripts: { ...get().transcripts, [id]: { ...current, modeId: "ask" } } });
+      useWorkspace.getState().task(id, { mode: "ask" });
     }
+    set({
+      planReviewOpen: false,
+      planPanelOpen: true,
+      planDirty: false,
+      composer: text ? `${text}\n\n${IMPLEMENT_PLAN}` : IMPLEMENT_PLAN,
+    });
+    await get().send();
   },
 
   revisePlan: async (notes, comments = []) => {
+    const text = formatPlanFeedback(comments, notes);
+    if (await answerExitPlan(get, "cancelled", text || undefined)) {
+      set({ planReviewOpen: false, planPanelOpen: true, composer: "", planDirty: false });
+      return;
+    }
     const permission = get().permission;
     if (permission && isPlanPermission(permission)) {
       const reject = preferRejectOption(permission.options);
       if (reject) await get().answerPermission(reject.optionId);
       else await get().answerPermission(undefined, true);
     }
-    const text = formatPlanFeedback(comments, notes);
     set({ planReviewOpen: false, planPanelOpen: true, composer: text, planDirty: false });
     if (text) await get().send();
   },
 
   quitPlan: async () => {
+    if (await answerExitPlan(get, "abandoned")) {
+      set({ planReviewOpen: false, planPanelOpen: false, planDirty: false });
+      await get().setMode("ask");
+      return;
+    }
     set({ planReviewOpen: false, planPanelOpen: false, planDirty: false });
     if (get().sending) await get().stop();
     else if (get().permission) await get().answerPermission(undefined, true);

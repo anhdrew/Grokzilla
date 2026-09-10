@@ -31,10 +31,11 @@ export function buildTranscriptView(
   transcript: Transcript,
   permission: PermissionRequest | null,
   readOnly: boolean,
+  planApproval = false,
 ): TranscriptView {
   const blocks = transcript.blocks.map(blockToLine);
   const chat = blocks.map((block) => `[${block.type}]\n${block.text}`).join("\n\n");
-  const needs = sessionNeeds(transcript, thread, permission, readOnly);
+  const needs = sessionNeeds(transcript, thread, permission, readOnly, planApproval);
   return {
     sessionId,
     cwd: thread.cwd,
@@ -54,6 +55,7 @@ export function sessionNeeds(
   thread: ThreadInfo | undefined,
   permission: PermissionRequest | null,
   readOnly: boolean,
+  planApproval = false,
 ): ControlNeeds {
   const lastUser = lastText(transcript, "user");
   const lastAssistant = lastText(transcript, "assistant");
@@ -71,7 +73,9 @@ export function sessionNeeds(
       runningChildren > 0,
   );
   let summary: string;
-  if (permission) {
+  if (planApproval) {
+    summary = "Waiting for plan approval (Approve & build, request changes, or quit plan).";
+  } else if (permission) {
     summary = `Waiting for permission: ${permission.title || "tool approval"} (${permission.options.map((o) => o.name).join(", ") || "allow/deny"}).`;
   } else if (readOnly && running) {
     summary = `Watching a live grok -p run. Last user: ${clip(lastUser, 160) || "(none yet)"}.`;

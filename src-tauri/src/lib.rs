@@ -422,6 +422,24 @@ async fn respond_permission(
     client.respond_permission(id, option_id, cancelled).await
 }
 
+#[tauri::command]
+async fn respond_plan_approval(
+    state: State<'_, AppState>,
+    session_id: String,
+    process_id: u64,
+    id: u64,
+    outcome: String,
+    feedback: Option<String>,
+) -> Result<(), String> {
+    let client = task_client(&state, &session_id).await?;
+    if client.generation() != process_id {
+        return Err("Plan approval belongs to an expired process".into());
+    }
+    client
+        .respond_plan_approval(id, &outcome, feedback)
+        .await
+}
+
 fn app_menu(app: &tauri::App) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{AboutMetadata, MenuBuilder, SubmenuBuilder};
     let about = AboutMetadata {
@@ -511,6 +529,7 @@ pub fn run() {
             set_model,
             set_config_option,
             respond_permission,
+            respond_plan_approval,
             search_paths,
             list_dir,
             list_skills,

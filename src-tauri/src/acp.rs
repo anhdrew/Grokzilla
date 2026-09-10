@@ -1,6 +1,6 @@
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -34,6 +34,7 @@ struct AcpInner {
     session: std::sync::Mutex<Option<String>>,
     generation: u64,
     permissions: Mutex<HashMap<u64, Vec<String>>>,
+    plan_approvals: Mutex<HashSet<u64>>,
 }
 
 pub struct AcpClient {
@@ -93,6 +94,7 @@ impl AcpClient {
             session: std::sync::Mutex::new(None),
             generation: GENERATION.fetch_add(1, Ordering::SeqCst),
             permissions: Mutex::new(HashMap::new()),
+            plan_approvals: Mutex::new(HashSet::new()),
         });
 
         let reader_inner = inner.clone();
@@ -352,6 +354,38 @@ impl AcpClient {
         Ok(())
     }
 
+    pub async fn respond_plan_approval(
+        &self,
+        id: u64,
+        outcome: &str,
+        feedback: Option<String>,
+    ) -> Result<(), String> {
+        let mut pending = self.inner.plan_approvals.lock().await;
+        if !pending.contains(&id) {
+            return Err("Plan approval is no longer pending".into());
+        }
+        let outcome = match outcome {
+            "approved" | "cancelled" | "abandoned" => outcome,
+            _ => return Err("Invalid plan approval outcome".into()),
+        };
+        let mut result = json!({ "outcome": outcome });
+        if let Some(text) = feedback
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            result["feedback"] = json!(text);
+        }
+        self.write(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result
+        }))
+        .await?;
+        pending.remove(&id);
+        Ok(())
+    }
+
     pub async fn shutdown(&self) {
         self.inner.shutting_down.store(true, Ordering::SeqCst);
         let mut child = self.child.lock().await;
@@ -410,8 +444,16 @@ fn emit_event(inner: &AcpInner, mut event: AcpEvent) {
     }
 }
 
+fn is_exit_plan_ext_method(method: &str) -> bool {
+    method == "x.ai/exit_plan_mode" || method == "_x.ai/exit_plan_mode"
+}
+
 fn is_urgent_event(event: &AcpEvent) -> bool {
-    if event.kind == "permission" || event.kind == "exit" || event.kind == "error" {
+    if event.kind == "permission"
+        || event.kind == "plan_approval"
+        || event.kind == "exit"
+        || event.kind == "error"
+    {
         return true;
     }
     if event.kind != "update" {
@@ -535,6 +577,19 @@ mod merge_tests {
     }
 }
 
+#[cfg(test)]
+mod plan_ext_tests {
+    use super::is_exit_plan_ext_method;
+
+    #[test]
+    fn recognizes_grok_exit_plan_ext_methods() {
+        assert!(is_exit_plan_ext_method("x.ai/exit_plan_mode"));
+        assert!(is_exit_plan_ext_method("_x.ai/exit_plan_mode"));
+        assert!(!is_exit_plan_ext_method("session/request_permission"));
+        assert!(!is_exit_plan_ext_method("x.ai/ask_user_question"));
+    }
+}
+
 async fn handle_line(inner: &Arc<AcpInner>, line: &str) -> Option<AcpEvent> {
     let value: Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -599,6 +654,17 @@ async fn handle_line(inner: &Arc<AcpInner>, line: &str) -> Option<AcpEvent> {
                 inner.permissions.lock().await.insert(id, options);
                 return Some(AcpEvent {
                     kind: "permission".into(),
+                    session_id,
+                    method: Some(method.to_string()),
+                    id: Some(id),
+                    payload: params,
+                });
+            }
+
+            if is_exit_plan_ext_method(method) {
+                inner.plan_approvals.lock().await.insert(id);
+                return Some(AcpEvent {
+                    kind: "plan_approval".into(),
                     session_id,
                     method: Some(method.to_string()),
                     id: Some(id),

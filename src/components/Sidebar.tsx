@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   isTranscriptLive,
@@ -8,6 +8,7 @@ import {
   sameProject,
   workStatus,
 } from "../lib/format";
+import { expandSelectedIfAllowed, toggleExpanded as toggleExpandedSet } from "../lib/project-tree";
 import { useApp } from "../lib/store";
 import type { ThreadInfo } from "../lib/types";
 import { useWorkspace } from "../lib/workspace";
@@ -16,6 +17,32 @@ import { IconArchive, IconFolder, IconPlus, IconSearch, IconTerminal, IconTrash,
 function threadLabel(thread: ThreadInfo): string {
   const title = thread.title?.trim();
   return title && title.length > 0 ? title : "New chat";
+}
+
+function TreeCaret({
+  open,
+  label,
+  onClick,
+}: {
+  open: boolean;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="tree-caret"
+      aria-label={label}
+      aria-expanded={open}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onClick();
+      }}
+    >
+      <span className={`caret ${open ? "open" : ""}`} aria-hidden />
+    </button>
+  );
 }
 
 type ProjectGroup = { cwd: string; name: string; threads: ThreadInfo[] };
@@ -45,15 +72,15 @@ export const Sidebar = memo(function Sidebar() {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(selected ? [selected] : []));
   const [query, setQuery] = useState("");
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const collapsedByUser = useRef<string | null>(null);
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
 
   useEffect(() => {
-    if (!selected) return;
-    setExpanded((prev) => {
-      if (prev.has(selected)) return prev;
-      const next = new Set(prev);
-      next.add(selected);
-      return next;
-    });
+    const next = expandSelectedIfAllowed(expandedRef.current, selected, collapsedByUser.current);
+    if (!next) return;
+    collapsedByUser.current = null;
+    setExpanded(next);
   }, [selected]);
 
   const archivedThreadSet = useMemo(() => new Set(archivedThreads), [archivedThreads]);
@@ -128,15 +155,18 @@ export const Sidebar = memo(function Sidebar() {
     useWorkspace.getState().openNewTask(cwd);
   }
 
-  function onProjectClick(cwd: string) {
-    const isOpen = expanded.has(cwd);
-    selectProject(cwd);
+  function toggleExpanded(cwd: string) {
     setExpanded((prev) => {
-      const next = new Set(prev);
-      if (isOpen && sameProject(cwd, selected)) next.delete(cwd);
-      else next.add(cwd);
+      const { expanded: next, userCollapsed } = toggleExpandedSet(prev, cwd);
+      collapsedByUser.current = userCollapsed;
       return next;
     });
+  }
+
+  function onProjectClick(cwd: string) {
+    const key = normalizeCwd(cwd);
+    selectProject(key);
+    toggleExpanded(key);
   }
 
   return (
@@ -165,17 +195,22 @@ export const Sidebar = memo(function Sidebar() {
             selected={selected}
             expanded={expanded.has(project.cwd) || Boolean(query.trim())}
             onProjectClick={onProjectClick}
+            onToggle={toggleExpanded}
           />
         ))}
         {archivedCount > 0 ? (
           <section className="tree-group archive-root">
             <div className="tree-row project">
+              <TreeCaret
+                open={showArchived}
+                label={showArchived ? "Collapse archived" : "Expand archived"}
+                onClick={() => setArchiveOpen((open) => !open)}
+              />
               <button
                 className="tree-hit"
                 onClick={() => setArchiveOpen((open) => !open)}
                 title="Show archived projects and threads"
               >
-                <span className={`caret ${showArchived ? "open" : ""}`} aria-hidden />
                 <span className="tree-label">Archived</span>
                 <span className="tree-count">{archivedCount}</span>
               </button>
@@ -202,11 +237,13 @@ function ProjectSection({
   selected,
   expanded,
   onProjectClick,
+  onToggle,
 }: {
   project: ProjectGroup;
   selected: string | null;
   expanded: boolean;
   onProjectClick: (cwd: string) => void;
+  onToggle: (cwd: string) => void;
 }) {
   const archiveProject = useApp((s) => s.archiveProject);
   const isSelected = sameProject(project.cwd, selected);
@@ -224,8 +261,12 @@ function ProjectSection({
   return (
     <section className={`tree-group ${isSelected ? "is-current" : ""}`}>
       <div className={`tree-row project ${isSelected ? "active" : ""}`}>
+        <TreeCaret
+          open={expanded}
+          label={expanded ? `Collapse ${project.name}` : `Expand ${project.name}`}
+          onClick={() => onToggle(project.cwd)}
+        />
         <button className="tree-hit" title={project.cwd} onClick={() => onProjectClick(project.cwd)}>
-          <span className={`caret ${expanded ? "open" : ""}`} aria-hidden />
           <IconFolder />
           <span className="tree-label">{project.name}</span>
           {busy ? <span className={`status ${busy}`} title={busy === "running" ? "Working" : "Needs input"} /> : null}
@@ -403,8 +444,12 @@ function ArchivedFolder({ project }: { project: ProjectGroup }) {
   return (
     <section className="tree-group">
       <div className="tree-row project">
+        <TreeCaret
+          open={open}
+          label={open ? `Collapse ${project.name}` : `Expand ${project.name}`}
+          onClick={() => setOpen((value) => !value)}
+        />
         <button className="tree-hit" title={project.cwd} onClick={() => setOpen((value) => !value)}>
-          <span className={`caret ${open ? "open" : ""}`} aria-hidden />
           <IconFolder />
           <span className="tree-label">{project.name}</span>
           {busy ? <span className={`status ${busy}`} title="Working" /> : null}

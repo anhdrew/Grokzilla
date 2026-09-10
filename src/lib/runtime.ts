@@ -1,9 +1,9 @@
-import type { Attachment, PermissionRequest, PlanDoc } from './types';
+import type { Attachment, PermissionRequest, PlanApprovalRequest, PlanDoc } from './types';
 import type { ModelState } from './models';
 export type RunStatus = 'idle' | 'queued' | 'running' | 'needs-input' | 'completed' | 'failed' | 'interrupted';
 export type QueuedPrompt = { id: string; text: string; attachments: Attachment[] };
 export const EMPTY_QUEUE: QueuedPrompt[] = [];
-export type TaskRuntime = ModelState & { status: RunStatus; processId?: number; queue: QueuedPrompt[]; permissions: PermissionRequest[]; draft: string; attachments: Attachment[]; planDoc: PlanDoc | null; planPanelOpen: boolean; planReviewOpen: boolean; error?: string; loading: boolean };
+export type TaskRuntime = ModelState & { status: RunStatus; processId?: number; queue: QueuedPrompt[]; permissions: PermissionRequest[]; draft: string; attachments: Attachment[]; planDoc: PlanDoc | null; planPanelOpen: boolean; planReviewOpen: boolean; planApproval?: PlanApprovalRequest; error?: string; loading: boolean };
 export function emptyRuntime(): TaskRuntime { return { status: 'idle', queue: [], permissions: [], models: [], efforts: [], draft: '', attachments: [], planDoc: null, planPanelOpen: false, planReviewOpen: false, loading: false }; }
 export function isRunning(task?: Pick<TaskRuntime, 'status'>): boolean { return task?.status === 'running' || task?.status === 'needs-input'; }
 export function nextQueued(tasks: Record<string, TaskRuntime>, concurrency: number): string[] {

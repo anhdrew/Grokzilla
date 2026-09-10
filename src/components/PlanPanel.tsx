@@ -86,6 +86,7 @@ export function PlanPanel() {
   const review = useApp((s) => s.planReviewOpen);
   const planDoc = useApp((s) => s.planDoc);
   const permission = useApp((s) => s.permission);
+  const planApproval = useApp((s) => s.planApproval);
   const sending = useApp((s) => s.sending);
   const readOnly = useApp((s) => isReadOnlySession(s.selectedSession, s.threads, s.readOnlyIds));
   const modeId = useApp((s) => {
@@ -112,6 +113,7 @@ export function PlanPanel() {
   const [commentBody, setCommentBody] = useState("");
   const [copying, setCopying] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [acting, setActing] = useState(false);
   const [error, setError] = useState("");
 
   const entries = useMemo(() => {
@@ -135,7 +137,7 @@ export function PlanPanel() {
   }, [planDoc?.exists, entries.length]);
 
   const planPerm = permission ? isPlanPermission(permission) : false;
-  const showReview = !readOnly && (review || planPerm);
+  const showReview = !readOnly && (review || planPerm || Boolean(planApproval));
 
   useEffect(() => {
     if (showReview) setDocView((current) => (current === "edit" ? current : "review"));
@@ -224,6 +226,18 @@ export function PlanPanel() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function runPlanAction(action: () => Promise<void>) {
+    setActing(true);
+    setError("");
+    try {
+      await action();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActing(false);
     }
   }
 
@@ -357,18 +371,19 @@ export function PlanPanel() {
               <div className="perm-actions">
                 <button
                   className="primary"
-                  onClick={() => void approvePlan(comments, notes)}
+                  disabled={acting}
+                  onClick={() => void runPlanAction(() => approvePlan(comments, notes))}
                   title={feedback ? "Approve and send comments with the plan" : "Approve the plan and start building"}
                 >
-                  {pending ? "Approve w/ comments" : "Approve & build"}
+                  {acting ? "Working…" : pending ? "Approve w/ comments" : "Approve & build"}
                 </button>
-                <button className="ghost" onClick={() => void revisePlan(notes, comments)}>
+                <button className="ghost" disabled={acting} onClick={() => void runPlanAction(() => revisePlan(notes, comments))}>
                   Request changes
                 </button>
-                <button className="ghost" onClick={() => switchView("edit")}>
+                <button className="ghost" disabled={acting} onClick={() => switchView("edit")}>
                   Edit
                 </button>
-                <button className="danger" onClick={() => void quitPlan()}>
+                <button className="danger" disabled={acting} onClick={() => void runPlanAction(() => quitPlan())}>
                   Quit plan
                 </button>
                 <button className="ghost" onClick={() => void copyPlan()}>

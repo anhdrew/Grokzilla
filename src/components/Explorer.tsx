@@ -148,7 +148,8 @@ function ExplorerRow({
         setExplorerDrag(event.dataTransfer, entry);
       }}
       onClick={() => {
-        if (!folder) useWorkspace.getState().openFile(entry.rel || entry.path);
+        if (folder) onToggle?.();
+        else useWorkspace.getState().openFile(entry.rel || entry.path);
       }}
       onDoubleClick={(event) => {
         event.preventDefault();
@@ -158,12 +159,18 @@ function ExplorerRow({
     >
       {folder ? (
         <button
+          type="button"
           className="explorer-caret"
+          onMouseDown={(event) => {
+            event.stopPropagation();
+          }}
           onClick={(event) => {
+            event.preventDefault();
             event.stopPropagation();
             onToggle?.();
           }}
           aria-label={open ? "Collapse" : "Expand"}
+          aria-expanded={open}
         >
           <span className={`caret ${open ? "open" : ""}`} />
         </button>

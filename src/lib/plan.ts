@@ -108,6 +108,10 @@ export function isPlanPermission(permission: PermissionRequest) {
   return isExitPlanLabel(title, rec) || isEnterPlanLabel(title, rec);
 }
 
+export function isExitPlanExtMethod(method?: string | null) {
+  return method === "x.ai/exit_plan_mode" || method === "_x.ai/exit_plan_mode";
+}
+
 export function preferAllowOption(options: PermissionOption[]) {
   return (
     options.find((option) => /allow|accept|approve|yes|code|auto/i.test(`${option.kind} ${option.name}`)) ??

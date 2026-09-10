@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatPlanFeedback,
   isExitPlanLabel,
+  isExitPlanExtMethod,
   isExitPlanUpdate,
   isPlanPermission,
   planEntries,
@@ -51,6 +52,9 @@ describe("plan helpers", () => {
       }),
     ).toBe(true);
     expect(isExitPlanUpdate({ sessionUpdate: "tool_call", title: "exit_plan_mode" })).toBe(true);
+    expect(isExitPlanExtMethod("x.ai/exit_plan_mode")).toBe(true);
+    expect(isExitPlanExtMethod("_x.ai/exit_plan_mode")).toBe(true);
+    expect(isExitPlanExtMethod("session/request_permission")).toBe(false);
     expect(
       isPlanPermission({
         id: 1,

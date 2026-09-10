@@ -15,8 +15,8 @@ The build is ad-hoc signed (no Apple Developer ID). First launch: right-click **
 To cut a new GitHub Release, bump `version` in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, then:
 
 ```bash
-git tag v0.4.1
-git push origin v0.4.1
+git tag v0.5.0
+git push origin v0.5.0
 ```
 
 GitHub Actions builds both Mac chips and uploads the `.dmg` files to the release.

@@ -90,6 +90,20 @@ export const api = {
     invoke<Record<string, unknown>>("set_config_option", { sessionId, configId, value }),
   respondPermission: (sessionId: string, processId: number, id: number, optionId?: string, cancelled = false) =>
     invoke<void>("respond_permission", { sessionId, processId, id, optionId, cancelled }),
+  respondPlanApproval: (
+    sessionId: string,
+    processId: number,
+    id: number,
+    outcome: "approved" | "cancelled" | "abandoned",
+    feedback?: string,
+  ) =>
+    invoke<void>("respond_plan_approval", {
+      sessionId,
+      processId,
+      id,
+      outcome,
+      feedback: feedback || null,
+    }),
   openInTerminal: (sessionId: string, cwd: string) =>
     invoke<void>("open_in_terminal", { sessionId, cwd }),
 };

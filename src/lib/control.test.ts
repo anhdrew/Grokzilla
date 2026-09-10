@@ -25,6 +25,11 @@ describe("sessionNeeds", () => {
     expect(needs.summary).toContain("token cookie");
   });
 
+  it("calls out a waiting plan approval", () => {
+    const needs = sessionNeeds(emptyTranscript(), thread, null, false, true);
+    expect(needs.summary).toContain("plan approval");
+  });
+
   it("calls out a waiting permission", () => {
     const needs = sessionNeeds(emptyTranscript(), thread, {
       id: 1,

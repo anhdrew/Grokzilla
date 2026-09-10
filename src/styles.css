@@ -483,9 +483,13 @@ textarea::placeholder { color: var(--faint); }
 }
 .tree-action:hover { background: var(--bg-hover); color: var(--text); }
 .tree-action.danger:hover { color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); }
-.tree-action.on-row { opacity: 0; }
+.tree-action.on-row { opacity: 0; pointer-events: none; }
 .tree-row:hover .tree-action.on-row,
-.tree-row.active .tree-action.on-row { opacity: 1; }
+.tree-row.active .tree-action.on-row,
+.tree-row:focus-within .tree-action.on-row {
+  opacity: 1;
+  pointer-events: auto;
+}
 
 .tree-group { margin-bottom: 2px; }
 .tree-group.is-current .tree-row.project .tree-label { font-weight: 600; }
@@ -502,6 +506,7 @@ textarea::placeholder { color: var(--faint); }
   color: inherit;
   padding: 0 4px 0 2px;
 }
+.tree-row.project { min-height: 32px; }
 .tree-row.thread:hover { background: var(--bg-hover); }
 .tree-row.thread.active { background: var(--bg-active); }
 .tree-row.project.active { background: transparent; }
@@ -518,6 +523,20 @@ textarea::placeholder { color: var(--faint); }
   padding: 5px 2px;
   min-height: 28px;
 }
+.tree-row.project .tree-hit { min-height: 32px; }
+.tree-caret {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  padding: 0;
+}
+.tree-caret:hover { background: var(--bg-hover); }
 .caret {
   width: 8px;
   height: 8px;
@@ -525,10 +544,10 @@ textarea::placeholder { color: var(--faint); }
   border-right: 1.4px solid var(--faint);
   border-bottom: 1.4px solid var(--faint);
   transform: rotate(-45deg);
-  margin: 0 2px 0 4px;
-  opacity: 0.7;
+  margin: 0 0 2px;
+  opacity: 0.85;
 }
-.caret.open { transform: rotate(45deg); margin-top: -2px; }
+.caret.open { transform: rotate(45deg); margin: -2px 0 0; }
 .tree-label {
   flex: 1;
   min-width: 0;
@@ -590,7 +609,7 @@ textarea::placeholder { color: var(--faint); }
   padding: 8px 8px 2px;
 }
 .archive-root { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
-.archive-root .tree-action.on-row { opacity: 0.7; }
+.archive-root .tree-action.on-row { opacity: 0.7; pointer-events: auto; }
 .archive-root .tree-row:hover .tree-action.on-row { opacity: 1; }
 .status {
   width: 6px;
@@ -1740,8 +1759,8 @@ textarea::placeholder { color: var(--faint); }
 .explorer-row:hover { background: var(--bg-hover); color: var(--text); }
 .explorer-row:active { cursor: grabbing; }
 .explorer-caret {
-  width: 16px;
-  height: 16px;
+  width: 22px;
+  height: 22px;
   flex: none;
   display: grid;
   place-items: center;
@@ -1749,7 +1768,9 @@ textarea::placeholder { color: var(--faint); }
   background: transparent;
   color: inherit;
   padding: 0;
+  border-radius: 6px;
 }
+.explorer-caret:hover { background: var(--bg-hover); }
 .explorer-label {
   min-width: 0;
   font-size: 12.5px;
